@@ -9,14 +9,12 @@ IMG_EMB_PATH = os.path.join(SCRIPT_DIR, "img_embeddings.npy")
 TXT_EMB_PATH = os.path.join(SCRIPT_DIR, "txt_embeddings.npy")
 META_PATH    = os.path.join(SCRIPT_DIR, "metadata.json")
 
-TOP_K = 5  # how many results to show per query
-
 
 def load_embeddings():
     """Load embeddings and metadata saved by embed.py."""
     print("loading embeddings...")
-    img_embs = np.load(IMG_EMB_PATH)   # (1000, 512) — L2 normalized
-    txt_embs = np.load(TXT_EMB_PATH)   # (5000, 512) — L2 normalized
+    img_embs = np.load(IMG_EMB_PATH)   # (1000, 512), L2-normalized
+    txt_embs = np.load(TXT_EMB_PATH)   # (5000, 512), L2-normalized
 
     with open(META_PATH) as f:
         meta = json.load(f)
@@ -29,41 +27,82 @@ def load_embeddings():
     return img_embs, txt_embs, filenames, captions
 
 
-def text_to_image(query_embs, img_embs, top_k=TOP_K):
-    """Given text embeddings, return top-k image indices for each query.
+def recall_at_k_text_to_image(txt_embs, img_embs, ks=(1, 5, 10)):
+    """Recall@K for text-to-image retrieval.
 
-    Since embeddings are already L2-normalized, dot product = cosine similarity.
+    For each of the 5000 captions, compute similarity to all 1000 images
+    and check if the ground truth image lands in the top K.
+
+    Ground truth: caption at flat index t belongs to image t // 5.
     """
-    # multiply each text vector against all 1000 image vectors at once
-    # result shape: (num_queries, 1000) — each row is similarity scores for one query
-    sim = query_embs @ img_embs.T
+    # compute full similarity matrix all at once — shape (5000, 1000)
+    # dot product = cosine sim because embeddings are already L2-normalized
+    sim = txt_embs @ img_embs.T
 
-    # argsort descending: ranked[i] = image indices sorted by similarity for query i
-    ranked = np.argsort(-sim, axis=1)
+    hits = {k: 0 for k in ks}
 
-    # return only the top-k columns
-    return ranked[:, :top_k]
+    for t in range(len(txt_embs)):
+        # the correct image for caption t is always at index t // 5
+        # (captions 0-4 go with image 0, captions 5-9 go with image 1, etc.)
+        gt_img = t // 5
+
+        # rank all images by similarity to this caption, descending
+        ranked = np.argsort(-sim[t])   # shape (1000,)
+
+        for k in ks:
+            # hit if the ground truth image is in the top k
+            if gt_img in ranked[:k]:
+                hits[k] += 1
+
+    # convert hit counts to percentages
+    recall = {k: hits[k] / len(txt_embs) * 100 for k in ks}
+    return recall
+
+
+def recall_at_k_image_to_text(img_embs, txt_embs, ks=(1, 5, 10)):
+    """Recall@K for image-to-text retrieval.
+
+    For each of the 1000 images, check if any of its 5 ground truth captions
+    land in the top K when ranking all 5000 captions by similarity.
+    """
+    # similarity matrix — shape (1000, 5000)
+    sim = img_embs @ txt_embs.T
+
+    hits = {k: 0 for k in ks}
+
+    for i in range(len(img_embs)):
+        # image i has 5 paired captions at these flat indices
+        gt_captions = set(range(5 * i, 5 * i + 5))
+
+        # rank all 5000 captions by similarity to this image
+        ranked = np.argsort(-sim[i])   # shape (5000,)
+
+        for k in ks:
+            top_k_set = set(ranked[:k].tolist())
+            # success if at least one ground truth caption appears in the top k
+            if len(gt_captions & top_k_set) > 0:
+                hits[k] += 1
+
+    recall = {k: hits[k] / len(img_embs) * 100 for k in ks}
+    return recall
 
 
 if __name__ == "__main__":
     img_embs, txt_embs, filenames, captions = load_embeddings()
 
-    # try a few example queries to see if retrieval makes sense
-    # pick 3 random captions and see if CLIP retrieves the right image
-    test_indices = [0, 100, 500]   # caption indices to query with
+    ks = (1, 5, 10)
 
-    print("\nrunning a few example queries...\n")
-    for t in test_indices:
-        gt_image = t // 5   # caption t belongs to image t//5
+    print("\nrunning text -> image evaluation (5000 queries)...")
+    ti = recall_at_k_text_to_image(txt_embs, img_embs, ks=ks)
 
-        # get top-k images for this single caption
-        q_emb = txt_embs[t:t+1]   # shape (1, 512) — keep 2D for the matmul
-        top_k_images = text_to_image(q_emb, img_embs, top_k=TOP_K)[0]  # shape (top_k,)
+    print("running image -> text evaluation (1000 queries)...")
+    it = recall_at_k_image_to_text(img_embs, txt_embs, ks=ks)
 
-        print(f"query caption: \"{captions[t]}\"")
-        print(f"ground truth image: {filenames[gt_image]} (index {gt_image})")
-        print(f"top {TOP_K} retrieved images:")
-        for rank, img_idx in enumerate(top_k_images, start=1):
-            hit = " <-- correct" if img_idx == gt_image else ""
-            print(f"  {rank}. {filenames[img_idx]} (index {img_idx}){hit}")
-        print()
+    # print a clean table
+    print("\n" + "=" * 48)
+    print(f"  {'task':<20} {'R@1':>7} {'R@5':>7} {'R@10':>7}")
+    print("-" * 48)
+    print(f"  {'text -> image':<20} {ti[1]:>6.1f}% {ti[5]:>6.1f}% {ti[10]:>6.1f}%")
+    print(f"  {'image -> text':<20} {it[1]:>6.1f}% {it[5]:>6.1f}% {it[10]:>6.1f}%")
+    print("=" * 48)
+    print("\nzero-shot CLIP ViT-B/32 on Flickr30K 1K test set.")
