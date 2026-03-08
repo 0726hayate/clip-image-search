@@ -33,3 +33,9 @@ R@10 of ~92% for text-to-image means that if you type a caption, there's a 92% c
 The index math for the evaluation was a bit tricky — captions are stored flat (5000 total) so caption `t` belongs to image `t // 5`. Had to be careful about this mapping. The image-to-text direction is slightly different because each image has 5 valid captions, so you get a hit if any of them appear in the top K.
 
 Tomorrow I'll add the interactive demo and clean up the README.
+
+## April 21
+
+Finished. Added the interactive demo (demo.py) — it's fast enough that there's no noticeable lag even without FAISS or any approximate search. For 1000 images the brute-force dot product is plenty fast.
+
+The README now has the full results table and explains the index math behind the evaluation. If I had more time I'd add a fine-tuning step to see how much improvement you can squeeze out of a few epochs on the training split — but the zero-shot numbers are already solid and the code is clean enough to extend.
