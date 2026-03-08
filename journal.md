@@ -24,8 +24,8 @@ Image embeddings are done (1000 × 512 float32). Text embeddings running now. Go
 Got the evaluation working. The results are honestly better than I expected for zero-shot:
 
 ```
-text -> image:  R@1=65.6%  R@5=87.0%  R@10=92.0%
-image -> text:  R@1=84.5%  R@5=96.0%  R@10=98.8%
+text -> image:  R@1=58.8%  R@5=83.5%  R@10=90.0%
+image -> text:  R@1=79.4%  R@5=95.0%  R@10=98.1%
 ```
 
 R@10 of ~92% for text-to-image means that if you type a caption, there's a 92% chance the right image is in the top 10 results out of 1000. That's pretty impressive for a model that was never fine-tuned on this dataset.

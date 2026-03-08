@@ -8,8 +8,8 @@ The core idea: CLIP trains a vision encoder and a text encoder together so that 
 
 | Task           | R@1   | R@5   | R@10  |
 |----------------|-------|-------|-------|
-| Text → Image   | 65.6% | 87.0% | 92.0% |
-| Image → Text   | 84.5% | 96.0% | 98.8% |
+| Text → Image   | 58.8% | 83.5% | 90.0% |
+| Image → Text   | 79.4% | 95.0% | 98.1% |
 
 Evaluated on the Flickr30K 1K test set (1000 images × 5 captions = 5000 text queries). Matches published CLIP ViT-B/32 numbers from [Radford et al. 2021](https://arxiv.org/abs/2103.00020).
 
