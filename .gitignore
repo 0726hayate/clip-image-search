@@ -1,4 +1,7 @@
 images/
+gundam/images/
+gundam_lora/
+plots/
 *.npy
 metadata.json
 __pycache__/
