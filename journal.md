@@ -45,3 +45,9 @@ The README now has the full results table and explains the index math behind the
 Found images on the Gundam fandom wiki organized by series. Using renders/official art for now since I'm still waiting on a Reddit API application to get real Gunpla build photos. The wiki images are lower quality as training data (official renders vs actual photographs of models) but good enough to test whether the approach works.
 
 Collected 6 series: UC Unicorn, AGE, SEED, Gundam 00, IBO, and G-Reco. Each series has a pretty distinct visual design language so this should be a good clustering test.
+
+## March 28
+
+LoRA fine-tuning is working. Used SupCon loss (same as my research project but for images instead of code) — all same-series suits in a batch are positives for each other, cross-series are negatives. LoRA only touches ~1% of CLIP's parameters (q_proj and v_proj in the vision encoder attention layers) but the series retrieval noticeably improves.
+
+Will write up the numbers once the visualization is done.
