@@ -51,3 +51,9 @@ Collected 6 series: UC Unicorn, AGE, SEED, Gundam 00, IBO, and G-Reco. Each seri
 LoRA fine-tuning is working. Used SupCon loss (same as my research project but for images instead of code) — all same-series suits in a batch are positives for each other, cross-series are negatives. LoRA only touches ~1% of CLIP's parameters (q_proj and v_proj in the vision encoder attention layers) but the series retrieval noticeably improves.
 
 Will write up the numbers once the visualization is done.
+
+## April 1
+
+t-SNE visualization is done and honestly it's the most satisfying part of this project. The before/after comparison shows the 6 Gundam series forming distinct clusters after fine-tuning, while the Flickr images (shown in grey) barely move — meaning we improved the niche domain without hurting the general-purpose embeddings.
+
+Used PCA first to find the right number of components systematically (explained variance ≥ 95%), then t-SNE with perplexity = sqrt(N). Updated the README with the new results section and embedded both plots.
