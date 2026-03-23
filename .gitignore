@@ -1,6 +1,6 @@
 images/
 gundam/images/
-gundam_lora/
+gundam_lora*/
 plots/
 *.npy
 metadata.json

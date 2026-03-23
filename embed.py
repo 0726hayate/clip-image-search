@@ -5,29 +5,37 @@ import zipfile
 
 import numpy as np
 import pandas as pd
+import torch
+import torch.nn.functional as F
 from PIL import Image
 from huggingface_hub import hf_hub_download
-from sentence_transformers import SentenceTransformer
+from transformers import CLIPModel, CLIPProcessor, AutoModel
 
 # ── paths ──────────────────────────────────────────────────────────────────
 SCRIPT_DIR   = os.path.dirname(os.path.abspath(__file__))
 IMAGES_DIR   = os.path.join(SCRIPT_DIR, "images")
-IMG_EMB_PATH = os.path.join(SCRIPT_DIR, "img_embeddings.npy")
-TXT_EMB_PATH = os.path.join(SCRIPT_DIR, "txt_embeddings.npy")
 META_PATH    = os.path.join(SCRIPT_DIR, "metadata.json")
 
-# ── model / batch settings ─────────────────────────────────────────────────
-MODEL_NAME = "clip-ViT-B-32"  # 512-dim shared image+text embedding space
-IMG_BATCH  = 64               # fits comfortably on GPU
-TXT_BATCH  = 256              # text is cheaper, bigger batches are fine
-
+DEVICE  = "cuda" if torch.cuda.is_available() else "cpu"
 REPO_ID = "nlphuji/flickr_1k_test_image_text_retrieval"
+
+# ── model registry ─────────────────────────────────────────────────────────
+MODELS = {
+    "b32":  "openai/clip-vit-base-patch32",
+    "l14":  "openai/clip-vit-large-patch14",
+    "jina": "jinaai/jina-clip-v2",
+    "h14":  "laion/CLIP-ViT-H-14-laion2B-s32B-b79K",
+}
+JINA_MODELS = {"jina"}
+
+# smaller batches for bigger models to stay within GPU memory
+IMG_BATCH = {"b32": 64, "l14": 32, "jina": 32, "h14": 16}
+TXT_BATCH = {"b32": 256, "l14": 128, "jina": 128, "h14": 64}
 
 
 def load_dataset_files():
     """Download (or fetch from cache) the CSV and image zip."""
     print("fetching dataset CSV from huggingface hub...")
-    # hf_hub_download checks the local cache first, so this is instant if already downloaded
     csv_path = hf_hub_download(repo_id=REPO_ID, filename="test_1k_flickr.csv", repo_type="dataset")
 
     print("fetching image zip from huggingface hub...")
@@ -39,9 +47,7 @@ def load_dataset_files():
 def parse_csv(csv_path):
     """Read the CSV and return parallel lists of filenames and captions."""
     df = pd.read_csv(csv_path)
-    # columns: filename, raw (JSON list of 5 captions), and some metadata we don't need
-
-    image_filenames = df["filename"].tolist()   # 1000 jpg filenames
+    image_filenames = df["filename"].tolist()
 
     all_captions = []
     for _, row in df.iterrows():
@@ -53,78 +59,97 @@ def parse_csv(csv_path):
     print(f"loaded {len(image_filenames)} images and {len(all_captions)} captions")
     assert len(image_filenames) == 1000, "expected 1000 images"
     assert len(all_captions) == 5000,   "expected 5 captions per image"
-
     return image_filenames, all_captions
 
 
 def extract_images(zip_path, image_filenames):
     """Unzip images to ./images/, skipping ones already extracted."""
     os.makedirs(IMAGES_DIR, exist_ok=True)
-
     print("extracting images from zip...")
     with zipfile.ZipFile(zip_path) as zf:
         for fname in image_filenames:
             dest = os.path.join(IMAGES_DIR, fname)
             if os.path.exists(dest):
-                continue  # already there, skip
+                continue
             zip_inner_path = "images_flickr_1k_test/" + fname
             with zf.open(zip_inner_path) as src, open(dest, "wb") as dst:
                 dst.write(src.read())
-
     print(f"images saved to {IMAGES_DIR}/")
 
 
-def encode_images(model, image_filenames):
-    """Load all images as PIL and encode them into 512-dim CLIP vectors."""
-    print("loading images into memory...")
-    pil_images = []
-    for fname in image_filenames:
-        img_path = os.path.join(IMAGES_DIR, fname)
-        # convert to RGB so grayscale images don't break CLIP's 3-channel input
-        img = Image.open(img_path).convert("RGB")
-        pil_images.append(img)
+def encode_clip(model_name, pil_images, captions, img_batch, txt_batch):
+    """Encode with HuggingFace CLIPModel + CLIPProcessor."""
+    processor = CLIPProcessor.from_pretrained(model_name)
+    model     = CLIPModel.from_pretrained(model_name).to(DEVICE)
+    model.eval()
 
-    print(f"encoding {len(pil_images)} images (batch_size={IMG_BATCH})...")
-    # sentence-transformers handles PIL images natively, no manual preprocessing needed
-    img_embeddings = model.encode(
-        pil_images,
-        batch_size=IMG_BATCH,
-        show_progress_bar=True,
-        convert_to_numpy=True,
-        normalize_embeddings=True,  # unit vectors so cosine sim == dot product later
-    )
-    print(f"image embeddings shape: {img_embeddings.shape}")  # (1000, 512)
-    return img_embeddings
+    # projection_dim tells us the output embedding size — never hardcode it
+    dim = model.config.projection_dim
+    print(f"  loaded | projection_dim={dim} | device={DEVICE}")
+
+    img_embs = []
+    with torch.no_grad():
+        for i in range(0, len(pil_images), img_batch):
+            batch  = pil_images[i : i + img_batch]
+            inputs = processor(images=batch, return_tensors="pt").to(DEVICE)
+            feats  = model.get_image_features(**inputs)
+            img_embs.append(F.normalize(feats, dim=-1).cpu().numpy())
+    img_embs = np.vstack(img_embs)
+    print(f"  image embeddings: {img_embs.shape}")
+
+    txt_embs = []
+    with torch.no_grad():
+        for i in range(0, len(captions), txt_batch):
+            batch  = captions[i : i + txt_batch]
+            inputs = processor(text=batch, return_tensors="pt",
+                               padding=True, truncation=True).to(DEVICE)
+            feats  = model.get_text_features(**inputs)
+            txt_embs.append(F.normalize(feats, dim=-1).cpu().numpy())
+    txt_embs = np.vstack(txt_embs)
+    print(f"  text embeddings:  {txt_embs.shape}")
+
+    del model
+    if DEVICE == "cuda":
+        torch.cuda.empty_cache()
+
+    return img_embs, txt_embs
 
 
-def encode_captions(model, all_captions):
-    """Encode all 5000 captions into 512-dim CLIP vectors."""
-    print(f"encoding {len(all_captions)} captions (batch_size={TXT_BATCH})...")
-    txt_embeddings = model.encode(
-        all_captions,
-        batch_size=TXT_BATCH,
-        show_progress_bar=True,
-        convert_to_numpy=True,
-        normalize_embeddings=True,  # same space as images, normalized for dot-product sim
-    )
-    print(f"text embeddings shape: {txt_embeddings.shape}")  # (5000, 512)
-    return txt_embeddings
+def encode_jina(model_name, pil_images, captions, img_batch, txt_batch):
+    """Encode with Jina CLIP v2 (AutoModel, trust_remote_code=True).
 
+    Jina's encode_image / encode_text return L2-normalized numpy arrays.
+    """
+    model = AutoModel.from_pretrained(model_name, trust_remote_code=True)
+    model.eval()
 
-def save_everything(img_embeddings, txt_embeddings, image_filenames, all_captions):
-    """Persist embeddings as .npy and metadata as JSON."""
-    np.save(IMG_EMB_PATH, img_embeddings)
-    np.save(TXT_EMB_PATH, txt_embeddings)
+    img_embs = []
+    for i in range(0, len(pil_images), img_batch):
+        batch = pil_images[i : i + img_batch]
+        with torch.no_grad():
+            embs = model.encode_image(batch)
+        if isinstance(embs, torch.Tensor):
+            embs = embs.cpu().numpy()
+        img_embs.append(np.array(embs))
+    img_embs = np.vstack(img_embs)
+    print(f"  image embeddings: {img_embs.shape}")
 
-    # save filenames and captions so retrieve.py can look up results by index
-    metadata = {
-        "filenames": image_filenames,  # list of 1000 jpg filenames
-        "captions": all_captions,      # list of 5000 captions (5 per image, in order)
-    }
-    with open(META_PATH, "w") as f:
-        json.dump(metadata, f)
+    txt_embs = []
+    for i in range(0, len(captions), txt_batch):
+        batch = captions[i : i + txt_batch]
+        with torch.no_grad():
+            embs = model.encode_text(batch)
+        if isinstance(embs, torch.Tensor):
+            embs = embs.cpu().numpy()
+        txt_embs.append(np.array(embs))
+    txt_embs = np.vstack(txt_embs)
+    print(f"  text embeddings:  {txt_embs.shape}")
 
-    print(f"saved:\n  {IMG_EMB_PATH}\n  {TXT_EMB_PATH}\n  {META_PATH}")
+    del model
+    if DEVICE == "cuda":
+        torch.cuda.empty_cache()
+
+    return img_embs, txt_embs
 
 
 if __name__ == "__main__":
@@ -132,11 +157,45 @@ if __name__ == "__main__":
     image_filenames, all_captions = parse_csv(csv_path)
     extract_images(zip_path, image_filenames)
 
-    print(f"\nloading CLIP model ({MODEL_NAME})...")
-    model = SentenceTransformer(MODEL_NAME)
+    # load all images into memory once; reuse across all 4 models
+    print("\nloading all images into memory...")
+    pil_images = [
+        Image.open(os.path.join(IMAGES_DIR, f)).convert("RGB")
+        for f in image_filenames
+    ]
 
-    img_embeddings = encode_images(model, image_filenames)
-    txt_embeddings = encode_captions(model, all_captions)
+    # if the original b32 files exist (from old embed.py run), reuse them
+    old_img = os.path.join(SCRIPT_DIR, "img_embeddings.npy")
+    old_txt = os.path.join(SCRIPT_DIR, "txt_embeddings.npy")
+    new_img_b32 = os.path.join(SCRIPT_DIR, "img_embeddings_b32.npy")
+    new_txt_b32 = os.path.join(SCRIPT_DIR, "txt_embeddings_b32.npy")
+    if os.path.exists(old_img) and not os.path.exists(new_img_b32):
+        print("\n[b32] reusing existing img_embeddings.npy -> img_embeddings_b32.npy")
+        np.save(new_img_b32, np.load(old_img))
+        np.save(new_txt_b32, np.load(old_txt))
 
-    save_everything(img_embeddings, txt_embeddings, image_filenames, all_captions)
-    print("\ndone. run retrieve.py next to evaluate.")
+    for tag, model_name in MODELS.items():
+        img_out = os.path.join(SCRIPT_DIR, f"img_embeddings_{tag}.npy")
+        txt_out = os.path.join(SCRIPT_DIR, f"txt_embeddings_{tag}.npy")
+
+        if os.path.exists(img_out) and os.path.exists(txt_out):
+            print(f"\n[{tag}] embeddings already exist, skipping")
+            continue
+
+        print(f"\n[{tag}] loading {model_name}...")
+        encode_fn = encode_jina if tag in JINA_MODELS else encode_clip
+        img_embs, txt_embs = encode_fn(
+            model_name, pil_images, all_captions,
+            IMG_BATCH[tag], TXT_BATCH[tag],
+        )
+
+        np.save(img_out, img_embs)
+        np.save(txt_out, txt_embs)
+        print(f"  saved -> {img_out}")
+        print(f"  saved -> {txt_out}")
+
+    # save metadata (same for all models — just filenames and captions)
+    with open(META_PATH, "w") as f:
+        json.dump({"filenames": image_filenames, "captions": all_captions}, f)
+
+    print("\ndone. run retrieve.py next.")

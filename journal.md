@@ -54,6 +54,40 @@ Will write up the numbers once the visualization is done.
 
 ## April 1
 
-t-SNE visualization is done and honestly it's the most satisfying part of this project. The before/after comparison shows the 6 Gundam series forming distinct clusters after fine-tuning, while the Flickr images (shown in grey) barely move — meaning we improved the niche domain without hurting the general-purpose embeddings.
+t-SNE visualization is done and honestly it's the most satisfying part of this project. The before/after comparison shows the 6 Gundam series forming distinct clusters after fine-tuning, while the Flickr images barely move — meaning we improved the niche domain without hurting the general-purpose embeddings.
 
-Used PCA first to find the right number of components systematically (explained variance ≥ 95%), then t-SNE with perplexity = sqrt(N). Updated the README with the new results section and embedded both plots.
+Used PCA first to find the right number of components systematically (explained variance ≥ 95%), then t-SNE with perplexity = sqrt(N). Added 7 Flickr categories (people, animals, sports, nature, food, vehicles, architecture) assigned by CLIP zero-shot similarity — the visualization now shows both Gundam clustering and Flickr semantic structure in the same plot. Updated the README with the new results section and embedded both plots.
+
+## April 8
+
+Realized the B/32 zero-shot results (R@1=58.8%) are a bit underwhelming on their own for a resume project. Started a 3-experiment comparison to understand how each encoder component contributes:
+
+- Exp 1 (better vision): fix text encoder, scale vision → CLIP ViT-L/14 (12L→24L vision)
+- Exp 2 (better text): fix vision, scale text → Jina CLIP v2 (EVA02-L vision + 560M XLM-RoBERTa text, 15× bigger text encoder than B/32's ~38M)
+- Exp 3 (both scaled): OpenCLIP ViT-H/14 trained on LAION-2B-en
+
+The Jina choice is deliberate — XLM-RoBERTa is bidirectional BERT-style vs CLIP's causal GPT-style text encoder, so exp 2 is also an architecture comparison, not just scale. True component isolation isn't possible with jointly-trained models so I added a caveat in the README.
+
+Running embeddings for all 3 new models and will add LoRA fine-tuning for each to get a full Gundam comparison.
+
+## April 12
+
+Comparison done. Full results:
+
+Flickr30K zero-shot (text→image R@1):
+- B/32 baseline: 58.8%
+- L/14 (exp1 better vision): 64.7% (+5.9pp)
+- Jina CLIP v2 (exp2 better text): 71.5% (+12.7pp)  
+- OpenCLIP H/14 (exp3 both): 77.7% (+18.9pp)
+
+The text encoder story is the clearest: Jina's bidirectional XLM-RoBERTa (560M params) outperforms L/14's GPT-style text encoder by 6.8pp on text→image retrieval, even though L/14's vision encoder is substantially bigger. Makes sense — the query in text→image retrieval IS the text, so better text encoding directly improves the query representation.
+
+Gundam LoRA fine-tuning R@1 gains:
+- B/32: 59.3% → 77.0%
+- L/14: 67.3% → 85.8%
+- Jina: 56.6% → 82.3% (largest gain, +25.7pp)
+- H/14: 72.6% → 89.4% (highest absolute)
+
+Surprising: Jina shows the biggest R@1 improvement from LoRA despite having the lowest base score. The EVA02-L encoder wasn't trained with the same visual-semantic CLIP objective, so it has more room to reshape its visual embedding space with a small adapter.
+
+Updated README with full comparison tables and regenerated the 4-row t-SNE plot with Flickr category colors.
