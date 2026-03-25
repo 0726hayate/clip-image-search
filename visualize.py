@@ -6,79 +6,94 @@ from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 
 # ── paths ─────────────────────────────────────────────────────────────────────
-SCRIPT_DIR      = os.path.dirname(os.path.abspath(__file__))
-IMG_EMB_PATH    = os.path.join(SCRIPT_DIR, "img_embeddings.npy")     # flickr images
-VAL_BASE_PATH   = os.path.join(SCRIPT_DIR, "gundam_val_base.npy")    # gundam base
-VAL_FT_PATH     = os.path.join(SCRIPT_DIR, "gundam_val_ft.npy")      # gundam fine-tuned
-VAL_LABELS_PATH = os.path.join(SCRIPT_DIR, "gundam_val_labels.npy")  # int labels 0–5
-PLOTS_DIR       = os.path.join(SCRIPT_DIR, "plots")
+SCRIPT_DIR     = os.path.dirname(os.path.abspath(__file__))
+PLOTS_DIR      = os.path.join(SCRIPT_DIR, "plots")
+FLICKR_CAT_PATH = os.path.join(SCRIPT_DIR, "flickr_categories.npy")
 
-# ── label names and colors ────────────────────────────────────────────────────
-# label 0 = flickr (not a gundam series — used as background context)
-# labels 1–6 = the 6 gundam series from finetune.py SERIES_TO_IDX
+# per-model embedding files (produced by embed.py and finetune.py)
+MODELS = {
+    "b32":  "CLIP ViT-B/32\n(baseline)",
+    "l14":  "CLIP ViT-L/14\n(exp1: better vision)",
+    "jina": "Jina CLIP v2\n(exp2: better text)",
+    "h14":  "OpenCLIP ViT-H/14\n(exp3: both scaled)",
+}
+
+# ── label scheme ──────────────────────────────────────────────────────────────
+# Labels 0..6  → Flickr30K categories (assigned by CLIP zero-shot in categorize_flickr.py)
+# Labels 7..12 → Gundam series (original 0..5 shifted by N_FLICKR_CATS=7)
+N_FLICKR_CATS = 7
+
 LABEL_NAMES = {
-    0: "Flickr30K",
-    1: "UC Unicorn",
-    2: "AGE",
-    3: "SEED",
-    4: "Gundam 00",
-    5: "IBO",
-    6: "G-Reco",
+    # Flickr categories — pastel colours, smaller dots
+    0: "Flickr: people",
+    1: "Flickr: animals",
+    2: "Flickr: sports",
+    3: "Flickr: nature",
+    4: "Flickr: food",
+    5: "Flickr: vehicles",
+    6: "Flickr: architecture",
+    # Gundam series — saturated colours, larger dots
+    7: "UC Unicorn",
+    8: "AGE",
+    9: "SEED",
+    10: "Gundam 00",
+    11: "IBO",
+    12: "G-Reco",
 }
+
+# Flickr: pastel palette, distinct from the saturated Gundam colours
+# Gundam: same saturated palette as before
 COLORS = {
-    0: "lightgrey",
-    1: "steelblue",
-    2: "darkorange",
-    3: "tomato",
-    4: "gold",
-    5: "seagreen",
-    6: "mediumpurple",
+    0:  "lightpink",       # people
+    1:  "burlywood",       # animals
+    2:  "powderblue",      # sports
+    3:  "palegreen",       # nature
+    4:  "thistle",         # food
+    5:  "lightyellow",     # vehicles
+    6:  "lightgray",       # architecture
+    7:  "steelblue",       # UC Unicorn
+    8:  "darkorange",      # AGE
+    9:  "tomato",          # SEED
+    10: "gold",            # Gundam 00
+    11: "seagreen",        # IBO
+    12: "mediumpurple",    # G-Reco
 }
-SIZES = {0: 6, 1: 20, 2: 20, 3: 20, 4: 20, 5: 20, 6: 20}
-ALPHAS = {0: 0.3, 1: 0.85, 2: 0.85, 3: 0.85, 4: 0.85, 5: 0.85, 6: 0.85}
+
+# Flickr: smaller, more transparent; Gundam: larger, more opaque
+SIZES = {
+    0: 8,  1: 8,  2: 8,  3: 8,  4: 8,  5: 8,  6: 8,
+    7: 22, 8: 22, 9: 22, 10: 22, 11: 22, 12: 22,
+}
+ALPHAS = {
+    0: 0.45, 1: 0.45, 2: 0.45, 3: 0.45, 4: 0.45, 5: 0.45, 6: 0.45,
+    7: 0.88, 8: 0.88, 9: 0.88, 10: 0.88, 11: 0.88, 12: 0.88,
+}
 
 
-def run_pca_tsne(all_embs, n_components_target=0.95):
-    """PCA with systematic k (explained variance >= threshold) then t-SNE to 2D.
+def run_pca_tsne(all_embs, n_components_target=0.95, tag=""):
+    """PCA (k chosen by explained variance >= threshold) then t-SNE to 2D.
 
-    Returns (2D coords, chosen k) and saves the scree plot.
+    k and perplexity are determined systematically from the data — no hardcoding.
+    Returns (2D coords, chosen k).
     """
-    # ── step 1: find how many PCA components explain enough variance ───────────
-    print("fitting PCA on all embeddings to find the right number of components...")
+    D = all_embs.shape[1]
+    print(f"  [{tag}] PCA on {all_embs.shape} (input dim={D})...")
     pca_probe = PCA()
     pca_probe.fit(all_embs)
 
     cumvar = np.cumsum(pca_probe.explained_variance_ratio_)
-    # searchsorted finds the first index where cumulative variance crosses the threshold
+    # smallest k such that cumulative variance crosses the target
     k = int(np.searchsorted(cumvar, n_components_target)) + 1
-    print(f"PCA: {k} components explain {n_components_target*100:.0f}% of variance (out of {all_embs.shape[1]} dims)")
+    print(f"  [{tag}] k={k} explains {n_components_target*100:.0f}% variance")
 
-    # ── save the scree plot ────────────────────────────────────────────────────
-    fig, ax = plt.subplots(figsize=(8, 4))
-    ax.plot(np.arange(1, len(cumvar) + 1), cumvar, linewidth=1.5)
-    ax.axhline(n_components_target, linestyle="--", color="red",  label=f"{n_components_target*100:.0f}% threshold")
-    ax.axvline(k,                    linestyle="--", color="orange", label=f"chosen k={k}")
-    ax.set_xlabel("number of PCA components")
-    ax.set_ylabel("cumulative explained variance")
-    ax.set_title("PCA scree plot — choosing k for t-SNE preprocessing")
-    ax.legend()
-    plt.tight_layout()
-    scree_path = os.path.join(PLOTS_DIR, "pca_scree.png")
-    plt.savefig(scree_path, dpi=150)
-    plt.close()
-    print(f"saved scree plot -> {scree_path}")
+    reduced = PCA(n_components=k).fit_transform(all_embs)
 
-    # ── step 2: reduce to k dims ───────────────────────────────────────────────
-    reduced = PCA(n_components=k).fit_transform(all_embs)   # (N, k)
-
-    # ── step 3: t-SNE to 2D ───────────────────────────────────────────────────
-    # perplexity = sqrt(N) is a principled default (roughly: neighborhood size)
     N = len(reduced)
-    perplexity = int(np.sqrt(N))
-    print(f"t-SNE: N={N}, perplexity={perplexity} (sqrt of N), output=2D")
+    perplexity = int(np.sqrt(N))   # principled default: roughly sqrt(N) neighbors
+    print(f"  [{tag}] t-SNE: N={N}, perplexity={perplexity}")
 
-    tsne = TSNE(n_components=2, perplexity=perplexity, max_iter=1000, random_state=42)
-    coords_2d = tsne.fit_transform(reduced)   # (N, 2)
+    tsne      = TSNE(n_components=2, perplexity=perplexity, max_iter=1000, random_state=42)
+    coords_2d = tsne.fit_transform(reduced)
 
     return coords_2d, k
 
@@ -95,7 +110,7 @@ def make_scatter(ax, coords, all_labels, title):
             label=LABEL_NAMES[label_id],
             edgecolors="none",
         )
-    ax.set_title(title, fontsize=13)
+    ax.set_title(title, fontsize=9)
     ax.set_xticks([])
     ax.set_yticks([])
 
@@ -103,57 +118,83 @@ def make_scatter(ax, coords, all_labels, title):
 if __name__ == "__main__":
     os.makedirs(PLOTS_DIR, exist_ok=True)
 
-    # ── load embeddings ────────────────────────────────────────────────────────
-    print("loading embeddings...")
-    flickr_embs  = np.load(IMG_EMB_PATH)     # (1000, 512) — Flickr30K images
-    gundam_base  = np.load(VAL_BASE_PATH)    # (N_val, 512) — Gundam, base CLIP
-    gundam_ft    = np.load(VAL_FT_PATH)      # (N_val, 512) — Gundam, fine-tuned
-    gundam_labels = np.load(VAL_LABELS_PATH) # (N_val,) — 0..5 series indices
+    # ── load Flickr category labels ───────────────────────────────────────
+    if not os.path.exists(FLICKR_CAT_PATH):
+        print(f"flickr_categories.npy not found. run categorize_flickr.py first.")
+        raise SystemExit(1)
+    flickr_cat_labels = np.load(FLICKR_CAT_PATH)   # (1000,) values 0..6
 
-    # shift Gundam labels by 1 so Flickr gets label 0 and Gundam series get 1–6
-    gundam_labels_shifted = gundam_labels + 1
+    # ── discover which models have all required embedding files ───────────
+    available = []
+    for tag in MODELS:
+        img_path    = os.path.join(SCRIPT_DIR, f"img_embeddings_{tag}.npy")
+        base_path   = os.path.join(SCRIPT_DIR, f"gundam_val_base_{tag}.npy")
+        ft_path     = os.path.join(SCRIPT_DIR, f"gundam_val_ft_{tag}.npy")
+        labels_path = os.path.join(SCRIPT_DIR, "gundam_val_labels.npy")
+        if all(os.path.exists(p) for p in [img_path, base_path, ft_path, labels_path]):
+            available.append(tag)
+        else:
+            missing = [os.path.basename(p) for p in [img_path, base_path, ft_path, labels_path]
+                       if not os.path.exists(p)]
+            print(f"[{tag}] missing: {missing}, skipping")
 
-    N_flickr = len(flickr_embs)
-    N_gundam = len(gundam_base)
-    print(f"Flickr: {N_flickr} images, Gundam val: {N_gundam} images")
+    if not available:
+        print("no models with complete embeddings. run embed.py and finetune.py first.")
+        raise SystemExit(1)
 
-    # ── stack into one matrix for joint PCA+t-SNE ─────────────────────────────
-    # Flickr label = 0, Gundam labels = 1..6
-    all_labels = np.concatenate([
-        np.zeros(N_flickr, dtype=int),
-        gundam_labels_shifted,
-    ])
+    # Gundam raw labels are 0..5; shift by N_FLICKR_CATS so they become 7..12
+    gundam_labels_raw     = np.load(os.path.join(SCRIPT_DIR, "gundam_val_labels.npy"))
+    gundam_labels_shifted = gundam_labels_raw + N_FLICKR_CATS
 
-    # run PCA+tSNE twice — once with base embeddings, once with fine-tuned
-    print("\n--- base CLIP embeddings ---")
-    all_base = np.vstack([flickr_embs, gundam_base])
-    coords_base, k_base = run_pca_tsne(all_base)
+    n_rows = len(available)
+    fig, axes = plt.subplots(n_rows, 2, figsize=(14, 5.5 * n_rows))
+    if n_rows == 1:
+        axes = axes[np.newaxis, :]   # keep consistent 2D indexing
 
-    print("\n--- fine-tuned CLIP embeddings ---")
-    all_ft = np.vstack([flickr_embs, gundam_ft])
-    coords_ft, k_ft = run_pca_tsne(all_ft)
+    for row, tag in enumerate(available):
+        print(f"\n[{tag}] {MODELS[tag].strip()}")
 
-    # ── side-by-side before/after plot ────────────────────────────────────────
-    fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+        flickr_embs = np.load(os.path.join(SCRIPT_DIR, f"img_embeddings_{tag}.npy"))
+        gundam_base = np.load(os.path.join(SCRIPT_DIR, f"gundam_val_base_{tag}.npy"))
+        gundam_ft   = np.load(os.path.join(SCRIPT_DIR, f"gundam_val_ft_{tag}.npy"))
 
-    make_scatter(axes[0], coords_base, all_labels, "Zero-shot CLIP")
-    make_scatter(axes[1], coords_ft,   all_labels, "CLIP + LoRA (Gundam series)")
+        N_flickr   = len(flickr_embs)
+        # Flickr labels are the CLIP-assigned category (0..6)
+        # Gundam labels are shifted to 7..12
+        all_labels = np.concatenate([
+            flickr_cat_labels,
+            gundam_labels_shifted,
+        ])
 
-    # shared legend below both plots
+        all_base = np.vstack([flickr_embs, gundam_base])
+        all_ft   = np.vstack([flickr_embs, gundam_ft])
+
+        coords_base, _ = run_pca_tsne(all_base, tag=f"{tag}_base")
+        coords_ft,   _ = run_pca_tsne(all_ft,   tag=f"{tag}_ft")
+
+        model_label = MODELS[tag].replace("\n", " ")
+        make_scatter(axes[row, 0], coords_base, all_labels,
+                     f"{model_label} — zero-shot")
+        make_scatter(axes[row, 1], coords_ft,   all_labels,
+                     f"{model_label} — LoRA fine-tuned")
+
+    # shared legend: Flickr categories first, then Gundam series
     handles = [
         mpatches.Patch(color=COLORS[i], label=LABEL_NAMES[i])
         for i in sorted(LABEL_NAMES)
     ]
     fig.legend(handles=handles, loc="lower center", ncol=7,
-               fontsize=10, framealpha=0.9, bbox_to_anchor=(0.5, -0.02))
+               fontsize=8.5, framealpha=0.9, bbox_to_anchor=(0.5, -0.03))
 
-    plt.suptitle("Embedding space: Flickr30K (grey) + Gundam series (coloured)\n"
-                 "LoRA fine-tuning teaches CLIP to cluster builds by series",
-                 fontsize=12, y=1.01)
+    plt.suptitle(
+        "Embedding space: Flickr30K categories (pastel) + Gundam series (saturated)\n"
+        "Each row: zero-shot vs LoRA fine-tuned — PCA (95% var) → t-SNE (perplexity=√N)",
+        fontsize=11, y=1.01,
+    )
     plt.tight_layout()
 
-    tsne_path = os.path.join(PLOTS_DIR, "tsne_comparison.png")
-    plt.savefig(tsne_path, dpi=150, bbox_inches="tight")
+    out_path = os.path.join(PLOTS_DIR, "tsne_comparison.png")
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close()
-    print(f"\nsaved t-SNE comparison -> {tsne_path}")
+    print(f"\nsaved -> {out_path}")
     print("done.")
