@@ -1,17 +1,34 @@
-# CLIP Image-Text Retrieval on Flickr30K
+# CLIP Image-Text Retrieval + Domain Adaptation
 
-Zero-shot image-text retrieval using OpenAI's CLIP (ViT-B/32) on the standard Flickr30K 1K test benchmark. Encodes 1000 images and 5000 captions into a shared 512-dim embedding space, then retrieves using cosine similarity.
+Multi-modal image-text retrieval using CLIP-family models on the Flickr30K 1K test benchmark, with LoRA fine-tuning for domain-specific embedding structure.
 
-The core idea: CLIP trains a vision encoder and a text encoder together so that matching image-caption pairs end up close in the embedding space. Once you have those embeddings you can do cross-modal retrieval — given a text query, find the most similar images, and vice versa.
+The core idea: CLIP trains a vision encoder and a text encoder together so matching image-caption pairs end up close in the embedding space. Once you have those embeddings you can do cross-modal retrieval — given a text query, find the most similar images, and vice versa.
 
-## Results (zero-shot, no fine-tuning)
+## Model Comparison (zero-shot, no fine-tuning)
 
-| Task           | R@1   | R@5   | R@10  |
-|----------------|-------|-------|-------|
-| Text → Image   | 58.8% | 83.5% | 90.0% |
-| Image → Text   | 79.4% | 95.0% | 98.1% |
+Three controlled experiments against the CLIP ViT-B/32 baseline, varying vision and text encoder size independently to understand each component's contribution.
 
-Evaluated on the Flickr30K 1K test set (1000 images × 5 captions = 5000 text queries). Matches published CLIP ViT-B/32 numbers from [Radford et al. 2021](https://arxiv.org/abs/2103.00020).
+> Note: strict component isolation is impossible with jointly-trained models — "better vision" experiments also have slightly wider text encoders. Jina CLIP v2's text encoder scales 15× (38M→560M params, BERT-style bidirectional) while its vision encoder scales only 3.5× — making it a reasonable proxy for a text-dominant improvement.
+
+### Text → Image (5000 queries, Flickr30K 1K test set)
+
+| Experiment | Model | R@1 | R@5 | R@10 |
+|------------|-------|-----|-----|------|
+| baseline | CLIP ViT-B/32 | 58.8% | 83.5% | 90.0% |
+| exp1: better vision | CLIP ViT-L/14 | 64.7% | 87.1% | 92.1% |
+| exp2: better text | Jina CLIP v2 | 71.5% | 90.5% | 94.4% |
+| exp3: both scaled | OpenCLIP ViT-H/14 | 77.7% | 94.2% | 96.6% |
+
+### Image → Text (1000 queries)
+
+| Experiment | Model | R@1 | R@5 | R@10 |
+|------------|-------|-----|-----|------|
+| baseline | CLIP ViT-B/32 | 79.4% | 95.0% | 98.1% |
+| exp1: better vision | CLIP ViT-L/14 | 85.3% | 97.3% | 99.3% |
+| exp2: better text | Jina CLIP v2 | 85.0% | 98.2% | 99.0% |
+| exp3: both scaled | OpenCLIP ViT-H/14 | 90.6% | 99.2% | 99.7% |
+
+**Key finding**: text→image retrieval benefits more from a better text encoder (Jina +12.7pp R@1) than a better vision encoder (L/14 +5.9pp). Image→text flips: L/14 and Jina tie at ~85%, suggesting the query-side encoder drives the gain.
 
 ## Setup
 
@@ -22,13 +39,13 @@ pip install -r requirements.txt
 ## Usage
 
 ```bash
-# step 1: download dataset and compute embeddings (~2 min on GPU)
+# step 1: encode Flickr30K with all 4 models (~10 min on GPU)
 python embed.py
 
-# step 2: evaluate recall@k on the full benchmark
+# step 2: evaluate zero-shot retrieval
 python retrieve.py
 
-# step 3: interactive text search
+# step 3: interactive text search (uses CLIP ViT-B/32)
 python demo.py
 ```
 
@@ -42,38 +59,42 @@ query: a man in a red jacket skiing down a mountain
 
 ## How it works
 
-1. **embed.py** downloads the Flickr30K 1K test set from HuggingFace, extracts 1000 images and 5000 captions, and encodes them with CLIP. Embeddings are L2-normalized so cosine similarity equals a plain dot product.
+1. **embed.py** downloads the Flickr30K 1K test set from HuggingFace, extracts 1000 images and 5000 captions, and encodes them with each of 4 models. Embeddings are L2-normalized so cosine similarity equals a plain dot product. Per-model files are saved as `img_embeddings_{tag}.npy` / `txt_embeddings_{tag}.npy`.
 
-2. **retrieve.py** builds the full similarity matrix (text × image or image × text) with a single matrix multiply, ranks by score, and computes Recall@K. For text→image: caption `t` belongs to image `t // 5`. For image→text: image `i` has 5 valid captions at flat indices `5i .. 5i+4`.
+2. **retrieve.py** builds the full similarity matrix (text × image or image × text) with a single matrix multiply, ranks by score, and computes Recall@K for all 4 models. For text→image: caption `t` belongs to image `t // 5`. For image→text: image `i` has 5 valid captions at flat indices `5i .. 5i+4`.
 
-3. **demo.py** lets you type any English query and see the top-5 matching images with their ground truth captions.
+3. **demo.py** lets you type any English query and see the top-5 matching images.
 
-## Model and dataset
+## Models
 
-- Model: `clip-ViT-B-32` via [sentence-transformers](https://www.sbert.net/) (wraps `openai/clip-vit-base-patch32`)
-- Dataset: [`nlphuji/flickr_1k_test_image_text_retrieval`](https://huggingface.co/datasets/nlphuji/flickr_1k_test_image_text_retrieval) — the standard 1K test split of Flickr30K
+| Tag | Model | Vision | Text encoder | Emb dim |
+|-----|-------|--------|-------------|---------|
+| `b32` | `openai/clip-vit-base-patch32` | ViT-B/32, 12L | GPT-style 12L/512w (~38M) | 512 |
+| `l14` | `openai/clip-vit-large-patch14` | ViT-L/14, 24L | GPT-style 12L/768w | 768 |
+| `jina` | `jinaai/jina-clip-v2` | EVA02-L (307M) | XLM-RoBERTa-large (560M, bidirectional BERT-style) | 1024 |
+| `h14` | `laion/CLIP-ViT-H-14-laion2B-s32B-b79K` | ViT-H/14, 32L | GPT-style 24L/1024w | 1024 |
 
 ---
 
 ## Domain-Specific Fine-Tuning: Gundam Series
 
-To test whether CLIP can learn niche visual structure, I used LoRA to adapt the vision encoder for 6 Gundam mobile suit series. Each series has a strongly distinct visual design language (UC Unicorn's streamlined white/gold, AGE's blocky proportions, SEED's vibrant primary colours, etc.), making them a controlled probe for domain-specific embedding structure.
+To test whether CLIP can learn niche visual structure, LoRA was applied to each model's vision encoder for 6 Gundam mobile suit series. Each series has a strongly distinct visual design language, making them a controlled probe for domain-specific embedding structure.
 
 ### Setup
 
 - **Data**: 565 images scraped from the Gundam fandom wiki via MediaWiki API — 6 series (452 train / 113 val)
-- **LoRA**: r=16, α=32, `target_modules=["q_proj","v_proj"]` (vision encoder attention only) — 983K trainable params, ≈0.6% of total
-- **Loss**: Supervised Contrastive (Khosla et al. 2020) — all same-series images in a batch are positives for each other, cross-series are negatives. Richer signal than vanilla InfoNCE which has only one positive per anchor.
+- **LoRA**: r=16, α=32, `target_modules=["q_proj", "v_proj"]` (vision encoder attention), ~0.6–1% of parameters depending on model size
+- **Loss**: Supervised Contrastive (Khosla et al. 2020) — all same-series images in a batch are positives for each other, cross-series are negatives
 - **Training**: 10 epochs, batch size 32, lr=2e-4, temperature=0.07
 
 ```bash
-# step 4: collect Gundam images from wiki (~5 min, requires internet)
+# step 4: collect Gundam images from wiki (~5 min)
 python collect_gundam.py
 
-# step 5: LoRA fine-tuning (~20 min on GPU, saves adapter to gundam_lora/)
+# step 5: LoRA fine-tuning — set MODEL_TAG at top of finetune.py
 python finetune.py
 
-# step 6: PCA + t-SNE visualisation, saves plots/ directory
+# step 6: PCA + t-SNE visualisation for all models
 python visualize.py
 ```
 
@@ -81,17 +102,19 @@ python visualize.py
 
 Given a mobile suit image, what fraction of queries have at least one same-series image in the top K?
 
-| Model                | R@1   | R@5   | R@10  |
-|----------------------|-------|-------|-------|
-| Zero-shot CLIP       | 59.3% | 83.5% | 90.7% |
-| CLIP + LoRA (Gundam) | 77.0% | 92.4% | 96.5% |
+| Experiment | Model | Base R@1 | FT R@1 | Base R@10 | FT R@10 |
+|------------|-------|----------|--------|-----------|---------|
+| baseline | CLIP ViT-B/32 | 59.3% | 77.0% | 94.7% | 89.4% |
+| exp1: better vision | CLIP ViT-L/14 | 67.3% | 85.8% | 95.6% | 94.7% |
+| exp2: better text | Jina CLIP v2 | 56.6% | 82.3% | 93.8% | 94.7% |
+| exp3: both scaled | OpenCLIP ViT-H/14 | 72.6% | 89.4% | 99.1% | 96.5% |
+
+> Note: R@10 sometimes drops slightly after LoRA fine-tuning — SupCon loss tightens clusters and can push distant same-series images outside the top 10 while strongly improving top-1 precision. Jina shows the largest R@1 gain (+25.7pp) despite the lowest base score, suggesting its EVA02-L vision encoder adapts more easily than CLIP-trained encoders.
 
 ### Visualisation
 
-PCA (k chosen by 95% explained variance) followed by t-SNE (perplexity = √N) on Flickr30K + Gundam val set:
+PCA (k chosen by ≥95% explained variance) followed by t-SNE (perplexity = √N) on Flickr30K + Gundam val set. Each row is one model; left = zero-shot, right = LoRA fine-tuned:
 
 ![t-SNE comparison](plots/tsne_comparison.png)
 
-After fine-tuning, the 6 Gundam series form tight, well-separated clusters. The Flickr images (grey) are largely unaffected — the adapter improves the niche domain without degrading general-purpose retrieval.
-
-The PCA scree plot (saved to `plots/pca_scree.png`) shows that 95% of variance in CLIP's 512-dim space requires ~241 components — the embeddings are dense with no obvious low-rank shortcut, which is why the full PCA→t-SNE pipeline is necessary rather than going to t-SNE directly.
+Flickr30K images are colored by CLIP-assigned category (pastel, small dots); Gundam series are saturated large dots. After fine-tuning, the 6 Gundam series form tight, well-separated clusters while the Flickr category structure is largely preserved — the adapter improves the niche domain without degrading general-purpose retrieval.
