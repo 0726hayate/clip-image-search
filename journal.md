@@ -91,3 +91,14 @@ Gundam LoRA fine-tuning R@1 gains:
 Surprising: Jina shows the biggest R@1 improvement from LoRA despite having the lowest base score. The EVA02-L encoder wasn't trained with the same visual-semantic CLIP objective, so it has more room to reshape its visual embedding space with a small adapter.
 
 Updated README with full comparison tables and regenerated the 4-row t-SNE plot with Flickr category colors.
+
+## April 17
+
+Swapping SEED for Witch from Mercury — wanted a more recent series in the Gundam set rather than the long-running franchise pages. Updated `collect_gundam.py` (one-line dict change) and the SERIES_TO_IDX map. Re-running fine-tuning on all 4 models since the val composition changes.
+
+Did a small refactor too: `finetune.py` now takes `<model_tag> <dataset_tag>` as positional args and computes the class index map dynamically from `<dataset>/labels.json` — no more hardcoded SERIES_TO_IDX. This is groundwork for what I'm planning next (training adapters on more niches than just Gundam).
+
+b32 done quickly. l14 + h14 going overnight on different GPUs. jina tomorrow because it's the slow one (512×512 input + EVA02-L = large activations during backprop, runs at batch_size 8 instead of 32).
+
+WFM page only had 51 valid images (vs ~100 for the older series), so the WFM cluster will be the smallest one in the t-SNE — but contrastive learning works fine with that count.
+

@@ -10,7 +10,7 @@ from PIL import Image
 SERIES_PAGES = {
     "uc":   "Mobile_Suit_Gundam_Unicorn",
     "age":  "Mobile_Suit_Gundam_AGE",
-    "seed": "Mobile_Suit_Gundam_SEED",
+    "wfm":  "Mobile_Suit_Gundam_the_Witch_from_Mercury",
     "00":   "Mobile_Suit_Gundam_00",
     "ibo":  "Mobile_Suit_Gundam_IRON-BLOODED_ORPHANS",
     "grg":  "Gundam_Reconguista_in_G",
