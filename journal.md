@@ -102,3 +102,13 @@ b32 done quickly. l14 + h14 going overnight on different GPUs. jina tomorrow bec
 
 WFM page only had 51 valid images (vs ~100 for the older series), so the WFM cluster will be the smallest one in the t-SNE — but contrastive learning works fine with that count.
 
+## April 21
+
+Looked at the t-SNE again and the Flickr categories were a mess — `sports` had eaten 46% of the images because the CLIP zero-shot prompt I'd written ("outdoor recreational activity") was way too broad. Flickr30K is heavily people-doing-things, so almost everything matched. Dropped the prompt-based categorization entirely.
+
+Replaced with **Imagenette** — 10 ImageNet classes with built-in labels (tench, English springer, cassette player, chain saw, church, French horn, garbage truck, gas pump, golf ball, parachute). No prompt hack required. Used `johnowhitaker/imagenette2-320` on HuggingFace because the original `frgfm/imagenette` is now broken (uses a deprecated dataset script).
+
+Also split the visualization into two figures — `tsne_gundam.png` and `tsne_imagenette.png` — each with its own PCA + tSNE. The old combined plot had the Gundam clusters dominating the variance and squashing the Flickr structure into a less-discriminated blob. Independent runs fix that.
+
+Imagenette gets encoded with both base AND the Gundam LoRA loaded on top. The point is to verify visually that the niche fine-tune doesn't destroy general semantic clustering on a held-out dataset — the 10 classes should still form distinct color groups in both columns.
+
