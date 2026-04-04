@@ -112,3 +112,14 @@ Also split the visualization into two figures — `tsne_gundam.png` and `tsne_im
 
 Imagenette gets encoded with both base AND the Gundam LoRA loaded on top. The point is to verify visually that the niche fine-tune doesn't destroy general semantic clustering on a held-out dataset — the 10 classes should still form distinct color groups in both columns.
 
+## May 2
+
+Started reframing the project around an **adapter swarm** pattern after thinking about how Pinterest (or any large multi-domain visual platform) actually serves CLIP at scale. They have hundreds of niche communities — fashion, food, anime, art, woodworking — each with its own visual conventions. Fine-tuning a separate CLIP per niche means N copies of a 5 GB model in your serving fleet. LoRA flips this: one base + N tiny adapters, swap on request.
+
+Picked OpenCLIP ViT-H/14 as the base since it has the strongest Gundam FT numbers (89.4% R@1 with the old SEED-included set). Adding two more niches:
+
+- **Pokémon by type** — used PokéAPI to fetch ~50 species per type for 8 types (Fire/Water/Grass/Electric/Psychic/Dark/Dragon/Fairy). Slot-1 type only to avoid duplicates across classes. Official artwork from the PokeAPI sprites repo.
+- **Classical paintings by movement** — streamed `huggan/wikiart` and filtered to 8 movements (Renaissance / Baroque / Rococo / Romanticism / Impressionism / Post-Impressionism / Cubism / Pop Art). Picked these for visual distinctness across the historical span. (Surrealism isn't in WikiArt's taxonomy — substituted Pop Art.)
+
+`collect_pokemon.py` and `collect_paintings.py` done. Training the adapters next. The Gundam+Pokémon+Paintings trio gives the swarm a fan-art / pop-culture / high-art mix — good narrative spread.
+
