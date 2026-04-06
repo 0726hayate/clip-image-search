@@ -123,3 +123,12 @@ Picked OpenCLIP ViT-H/14 as the base since it has the strongest Gundam FT number
 
 `collect_pokemon.py` and `collect_paintings.py` done. Training the adapters next. The Gundam+Pokémon+Paintings trio gives the swarm a fan-art / pop-culture / high-art mix — good narrative spread.
 
+## May 6
+
+Swarm is working end-to-end. Three adapters trained on H/14: gundam_lora_h14, pokemon_lora_h14, paintings_lora_h14. Pokemon FT is weaker than I expected (R@1 50.0% → 53.7%) — Pokemon **types** turn out to be visually noisier than series-specific design language, since a Fire-type can look like almost anything as long as it has flame elements. That's actually a useful signal in the writeup: the swarm pattern works best for niches where the label correlates strongly with visual structure.
+
+Wrote `demo_swarm.py` — load base once, swap adapter at request time, retrieve top-5 from a pre-encoded niche index. The text encoder is frozen across all niches (LoRA only touches vision), so query encoding happens once with the base text encoder regardless of which niche we're searching.
+
+`swarm_analysis.py` prints three benchmark tables: storage, latency, quality. The headline: **1 base + 3 adapters ≈ 1 base in storage** (adapters are O(MB) on top of GB-scale weights), and adapter swap is in the hundreds of ms — well under any per-request budget. vs reloading 3 GB of safetensors from disk every time you need a different specialization, which is multi-second.
+
+Updated the README with a top-level Swarm section because this feels like the actual differentiator vs the standard "compare 4 CLIP variants + LoRA fine-tune" formula. The 4-model comparison answers *which encoder family is best*; the swarm answers *how to deploy specialization at scale*. Two separate stories, both load-bearing for a Pinterest-type pitch.

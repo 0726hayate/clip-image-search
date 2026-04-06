@@ -1,8 +1,11 @@
 images/
 gundam/images/
-gundam_lora*/
+pokemon/images/
+paintings/images/
+*_lora_*/
 plots/
 *.npy
+swarm_index_*.json
 metadata.json
 __pycache__/
 *.pyc
