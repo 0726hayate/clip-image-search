@@ -35,7 +35,7 @@ GUNDAM_LABELS = {
 }
 GUNDAM_COLORS = {
     0: "gold",         # 00
-    1: "darkorange",   # AGE
+    1: "black",        # AGE
     2: "mediumpurple", # G-Reco
     3: "seagreen",     # IBO
     4: "steelblue",    # UC Unicorn
@@ -44,15 +44,51 @@ GUNDAM_COLORS = {
 GUNDAM_SIZES  = {i: 28 for i in range(6)}
 GUNDAM_ALPHAS = {i: 0.85 for i in range(6)}
 
-# ── Imagenette (10 ImageNet classes, real labels — no prompt hack) ────────
-IMAGENETTE_LABELS = {
-    0: "tench", 1: "English springer", 2: "cassette player", 3: "chain saw",
-    4: "church", 5: "French horn", 6: "garbage truck", 7: "gas pump",
-    8: "golf ball", 9: "parachute",
+# ── Pokémon (8 types — sorted set of pokemon/labels.json) ────────────────
+#   ["dark", "dragon", "electric", "fairy", "fire", "grass", "psychic", "water"]
+POKEMON_LABELS = {
+    0: "Dark", 1: "Dragon", 2: "Electric", 3: "Fairy",
+    4: "Fire", 5: "Grass", 6: "Psychic", 7: "Water",
 }
-IMAGENETTE_COLORS = {i: c for i, c in enumerate(plt.cm.tab10.colors)}
-IMAGENETTE_SIZES  = {i: 14 for i in range(10)}
-IMAGENETTE_ALPHAS = {i: 0.7 for i in range(10)}
+POKEMON_COLORS = {
+    0: "#4f4f4f",  # Dark — slate
+    1: "#7038f8",  # Dragon — purple
+    2: "#f8d030",  # Electric — yellow
+    3: "#ee99ac",  # Fairy — pink
+    4: "#f08030",  # Fire — orange-red
+    5: "#78c850",  # Grass — green
+    6: "#f85888",  # Psychic — magenta
+    7: "#6890f0",  # Water — blue
+}
+POKEMON_SIZES  = {i: 28 for i in range(8)}
+POKEMON_ALPHAS = {i: 0.85 for i in range(8)}
+
+# ── Paintings (8 art movements — sorted set of paintings/labels.json) ─────
+#   ["Baroque","Cubism","Early_Renaissance","Impressionism","Pop_Art",
+#    "Post_Impressionism","Rococo","Romanticism"]
+PAINTINGS_LABELS = {
+    0: "Baroque", 1: "Cubism", 2: "Early Renaissance",
+    3: "Impressionism", 4: "Pop Art", 5: "Post-Impressionism",
+    6: "Rococo", 7: "Romanticism",
+}
+PAINTINGS_COLORS = {i: c for i, c in enumerate(plt.cm.Set1.colors)}
+PAINTINGS_SIZES  = {i: 28 for i in range(8)}
+PAINTINGS_ALPHAS = {i: 0.85 for i in range(8)}
+
+# ── Food-101 subset (10 confusable dishes — replaces Imagenette) ──────────
+# 3 visual mini-clusters: pasta / dessert / sandwich
+FOOD_LABELS = {
+    0: "lasagna", 1: "ravioli", 2: "spaghetti bolognese", 3: "spaghetti carbonara",
+    4: "chocolate cake", 5: "chocolate mousse", 6: "tiramisu",
+    7: "hamburger", 8: "club sandwich", 9: "pulled pork sandwich",
+}
+FOOD_COLORS = {
+    0: "#c0392b", 1: "#e74c3c", 2: "#e67e22", 3: "#f39c12",   # pasta — warm reds
+    4: "#6e2c00", 5: "#a04000", 6: "#cd853f",                  # dessert — browns
+    7: "#1f618d", 8: "#5dade2", 9: "#2980b9",                  # sandwich — blues
+}
+FOOD_SIZES  = {i: 14 for i in range(10)}
+FOOD_ALPHAS = {i: 0.7  for i in range(10)}
 
 
 def run_pca_tsne(all_embs, n_components_target=0.95, tag=""):
@@ -83,12 +119,13 @@ def make_scatter(ax, coords, labels, label_names, colors, sizes, alphas, title):
 
 
 def make_plot(dataset_tag, label_names, colors, sizes, alphas,
-              labels_path, out_path, suptitle):
-    """Generate a 4×2 t-SNE figure for one dataset, all available models."""
+              labels_path, out_path, suptitle, embedding_suffix=""):
+    """Generate a 4×2 t-SNE figure for one dataset, all available models.
+    `embedding_suffix` is appended after the model tag (e.g., "_fold0")."""
     available = []
     for tag in MODELS:
-        base_p = os.path.join(SCRIPT_DIR, f"{dataset_tag}_base_{tag}.npy")
-        ft_p   = os.path.join(SCRIPT_DIR, f"{dataset_tag}_ft_{tag}.npy")
+        base_p = os.path.join(SCRIPT_DIR, f"{dataset_tag}_base_{tag}{embedding_suffix}.npy")
+        ft_p   = os.path.join(SCRIPT_DIR, f"{dataset_tag}_ft_{tag}{embedding_suffix}.npy")
         if os.path.exists(base_p) and os.path.exists(ft_p):
             available.append(tag)
         else:
@@ -108,8 +145,8 @@ def make_plot(dataset_tag, label_names, colors, sizes, alphas,
 
     for row, tag in enumerate(available):
         print(f"\n[{dataset_tag}/{tag}] {MODELS[tag].strip()}")
-        base_e = np.load(os.path.join(SCRIPT_DIR, f"{dataset_tag}_base_{tag}.npy"))
-        ft_e   = np.load(os.path.join(SCRIPT_DIR, f"{dataset_tag}_ft_{tag}.npy"))
+        base_e = np.load(os.path.join(SCRIPT_DIR, f"{dataset_tag}_base_{tag}{embedding_suffix}.npy"))
+        ft_e   = np.load(os.path.join(SCRIPT_DIR, f"{dataset_tag}_ft_{tag}{embedding_suffix}.npy"))
 
         coords_base = run_pca_tsne(base_e, tag=f"{dataset_tag}_{tag}_base")
         coords_ft   = run_pca_tsne(ft_e,   tag=f"{dataset_tag}_{tag}_ft")
@@ -148,22 +185,53 @@ if __name__ == "__main__":
         alphas        = GUNDAM_ALPHAS,
         labels_path   = "gundam_val_labels.npy",
         out_path      = os.path.join(PLOTS_DIR, "tsne_gundam.png"),
-        suptitle      = ("Gundam series — base vs LoRA fine-tuned (PCA→t-SNE per model, independent)\n"
-                         "6 series: Gundam 00 / AGE / G-Reco / IBO / UC Unicorn / Witch from Mercury"),
+        suptitle      = ("Gundam series — base vs LoRA fine-tuned\n"
+                         "6 series: Gundam 00 / AGE / G-Reco / IBO / UC Unicorn / Witch from Mercury\n"
+                         "Each panel runs its own PCA→t-SNE; cluster structure is comparable, absolute coords are not"),
     )
 
-    # 2) Imagenette — held-out general dataset (LoRA trained on Gundam, not Imagenette)
+    # 2) Pokémon — niche #2 of the swarm (h14 only). Use fold-0 val embeddings
+    #    from the 5-fold CV.
     make_plot(
-        dataset_tag   = "imagenette",
-        label_names   = IMAGENETTE_LABELS,
-        colors        = IMAGENETTE_COLORS,
-        sizes         = IMAGENETTE_SIZES,
-        alphas        = IMAGENETTE_ALPHAS,
-        labels_path   = "imagenette_labels.npy",
-        out_path      = os.path.join(PLOTS_DIR, "tsne_imagenette.png"),
-        suptitle      = ("Imagenette — base vs after Gundam-LoRA loaded (PCA→t-SNE per model, independent)\n"
-                         "10 ImageNet classes encoded with both base and LoRA-loaded models — "
-                         "structure should be preserved (the adapter is a niche specialization, not a replacement)"),
+        dataset_tag       = "pokemon_val",
+        label_names       = POKEMON_LABELS,
+        colors            = POKEMON_COLORS,
+        sizes             = POKEMON_SIZES,
+        alphas            = POKEMON_ALPHAS,
+        labels_path       = "pokemon_val_labels_fold0.npy",
+        out_path          = os.path.join(PLOTS_DIR, "tsne_pokemon.png"),
+        suptitle          = ("Pokémon types — base vs LoRA fine-tuned (h14 — swarm base, fold-0 of 5-fold CV)\n"
+                             "Each panel runs its own PCA→t-SNE; cluster structure is comparable, absolute coords are not"),
+        embedding_suffix  = "_fold0",
+    )
+
+    # 3) Paintings — niche #3 of the swarm. Use fold-0 of the artist-disjoint
+    #    5-fold CV (different artists in train vs val per movement, no signature shortcut).
+    make_plot(
+        dataset_tag       = "paintings_val",
+        label_names       = PAINTINGS_LABELS,
+        colors            = PAINTINGS_COLORS,
+        sizes             = PAINTINGS_SIZES,
+        alphas            = PAINTINGS_ALPHAS,
+        labels_path       = "paintings_val_labels_fold0.npy",
+        out_path          = os.path.join(PLOTS_DIR, "tsne_paintings.png"),
+        suptitle          = ("Art movements — base vs LoRA fine-tuned (h14 — swarm base, fold-0 of 5-fold artist-disjoint CV)\n"
+                             "Each panel runs its own PCA→t-SNE; cluster structure is comparable, absolute coords are not"),
+        embedding_suffix  = "_fold0",
+    )
+
+    # 4) Food-101 subset — held-out general dataset (LoRA trained on Gundam, not Food)
+    make_plot(
+        dataset_tag   = "food",
+        label_names   = FOOD_LABELS,
+        colors        = FOOD_COLORS,
+        sizes         = FOOD_SIZES,
+        alphas        = FOOD_ALPHAS,
+        labels_path   = "food_labels.npy",
+        out_path      = os.path.join(PLOTS_DIR, "tsne_food.png"),
+        suptitle      = ("Food-101 subset (10 confusable dishes) — base vs Gundam-LoRA loaded\n"
+                         "Held-out general dataset; structure should be preserved despite niche adapter\n"
+                         "Each panel runs its own PCA→t-SNE; cluster structure is comparable, absolute coords are not"),
     )
 
     print("\ndone.")

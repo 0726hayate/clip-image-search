@@ -37,9 +37,9 @@ python swarm_analysis.py
 |---|---|---|---|
 | Gundam | 6 series (UC, AGE, WFM, 00, IBO, G-Reco) | 541 | Gundam fandom wiki via MediaWiki API |
 | Pokémon | 8 types (Fire/Water/Grass/Electric/Psychic/Dark/Dragon/Fairy) | 410 | PokéAPI official artwork |
-| Paintings | 8 art movements (Renaissance → Pop Art) | 480 | huggan/wikiart on HuggingFace |
+| Paintings | 8 art movements (Renaissance → Pop Art) | 476 | huggan/wikiart (artist-tracked, ≤30 imgs/artist for diversity) |
 
-`swarm_analysis.py` outputs three tables (numbers measured on this machine, OpenCLIP H/14 base):
+`swarm_analysis.py` outputs four tables (numbers measured on this machine, OpenCLIP H/14 base):
 
 **Storage**
 | Approach | Disk |
@@ -51,21 +51,40 @@ python swarm_analysis.py
 **Latency**
 | Operation | Time |
 |---|---|
-| Cold-load base h14 from cache → GPU | 2889 ms |
-| Hot adapter swap (base in memory, 3-niche avg) | **362 ms** |
-| Encode 1 text query (base text encoder) | 692 ms |
+| Cold-load base h14 from cache → GPU | 3491 ms |
+| Hot adapter swap (base in memory, 3-niche avg) | **422 ms** |
+| Encode 1 text query (base text encoder) | 784 ms |
 | Search top-5 over 410 images | 0.08 ms |
 
 Hot-swap is ~8× faster than reloading a full 3 GB model from disk. Combined with text encode + search, end-to-end query latency is ~1 sec from a cold base, dominated by text encoding — well under any per-request budget once the base is warm.
 
-**Quality (Recall@K per niche)**
-| Niche | Base R@1 | FT R@1 | Δ R@1 | Base R@10 | FT R@10 | Δ R@10 |
-|---|---|---|---|---|---|---|
-| Gundam | 67.9% | **90.8%** | +22.9pp | 97.2% | 97.2% | +0.0pp |
-| Pokémon | 50.0% | 53.7% | +3.7pp | 90.2% | 87.8% | -2.4pp |
-| Paintings | 79.2% | **94.8%** | +15.6pp | 95.8% | 96.9% | +1.0pp |
+**Quality (Recall@K per niche, 5-fold cross-validation)**
 
-> Note: not all niches benefit equally from LoRA. Gundam series have a strongly conditioned visual design language (mobile suits in one series share silhouette conventions, paint schemes, joint articulation), so contrastive fine-tuning produces clean clusters. Pokémon **types** are visually noisier — a Fire-type can look like almost anything as long as it has flame elements — so the gain from LoRA is smaller. This is itself a useful signal: the swarm pattern works best for niches where the label correlates with visual structure.
+Image→image retrieval inside the val set: for each val image, check whether any same-class val image is in its top K nearest neighbors. Aggregated as `mean ± std` across 5 folds; for paintings, train/val splits are **artist-disjoint per movement** (Monet stays in one fold) so style cues come from the movement rather than the artist's signature.
+
+| Niche | N (avg val) | Base R@1 | FT R@1 | Δ R@1 | Base R@10 | FT R@10 |
+|---|---|---|---|---|---|---|
+| Gundam | 108 | 67.8 ± 5.3% | **84.5 ± 2.1%** | **+16.7pp** | 98.3 ± 1.1% | 94.3 ± 2.1% |
+| Pokémon | 82 | 51.0 ± 2.6% | 60.5 ± 8.3% | +9.5pp | 92.4 ± 1.4% | 92.2 ± 3.1% |
+| Paintings | 95 | 90.3 ± 3.9% | 88.6 ± 2.6% | -1.6pp | 99.2 ± 1.0% | 97.6 ± 2.7% |
+
+**Quality (text→image P@K, mirrors the demo path)**
+
+For each class C, encode 3 prompt templates (`"a {C}-type pokemon"`, etc.) with the base text encoder, average to one ensembled prompt embedding, retrieve top-K from val images, compute Precision@K. This directly tests the swarm's actual user flow — text query in, ranked images out.
+
+| Niche | Base P@1 | FT P@1 | Δ P@1 | Base P@5 | FT P@5 | Δ P@5 |
+|---|---|---|---|---|---|---|
+| Gundam | 53.3 ± 6.7% | 56.7 ± 17.0% | +3.3pp | 40.0 ± 5.2% | **53.3 ± 7.9%** | **+13.3pp** |
+| Pokémon | 65.0 ± 9.4% | 50.0 ± 13.7% | **-15.0pp** | 58.0 ± 3.3% | 43.5 ± 5.8% | -14.5pp |
+| Paintings | 52.5 ± 9.4% | 52.5 ± 18.4% | +0.0pp | 54.0 ± 12.4% | 46.0 ± 14.2% | -8.0pp |
+
+> **The interesting story is the gap between the two tables.** Gundam wins on both — visual design language is rich enough that the SupCon-tightened clusters help text retrieval too. Pokémon shows a classic **embedding-collapse** pattern: image→image goes UP (clusters tighter) while text→image goes DOWN (the LoRA pulls vision embeddings away from the frozen text manifold). Paintings is the most honest result — the **+15.6pp R@1 number we originally published was almost entirely artist memorization**: under artist-disjoint splits, the LoRA gives essentially zero meaningful lift on either metric.
+>
+> **Caveats on these numbers:**
+> - **Image→image vs text→image are different objectives.** Image→image directly measures what SupCon optimizes (same-class proximity); text→image measures the user-facing flow but depends on text-vision alignment that LoRA doesn't explicitly preserve. Reporting both makes the trade-off visible.
+> - **Small val sets** (N=82–108 per niche). The std columns are real fold-to-fold variance, not error bars on a single number.
+> - **Paintings artist-disjoint splits have low artist count for some movements** (Pop_Art only has 2 wikiart artists), so paintings folds 2–4 have skewed val class distribution. The mean ± std reflects this.
+> - **Each t-SNE panel runs its own PCA→t-SNE** — only cluster *structure* is comparable across panels, not absolute 2D coordinates (already noted in figure captions).
 
 ---
 
@@ -130,18 +149,27 @@ python finetune.py jina gundam
 python finetune.py h14 pokemon
 python finetune.py h14 paintings
 
-# step 6: encode Imagenette (held-out general dataset) with each model, base + LoRA
-python embed_imagenette.py
+# step 6: encode Food-101 subset (held-out general dataset) with each model, base + LoRA
+python embed_food.py
 
-# step 7: t-SNE visualizations (two figures, one per dataset, independent PCA+tSNE)
+# step 7: t-SNE visualizations (4 figures, one per dataset, independent PCA→t-SNE per panel)
 python visualize.py
 
 # step 8: build swarm indexes + try queries
 python demo_swarm.py --build
 python demo_swarm.py --niche pokemon --query "fiery red dragon"
 
-# step 9: storage / latency / quality benchmarks for the swarm
+# step 9: storage / latency / quality benchmarks (image→image + text→image)
 python swarm_analysis.py
+
+# step 10 (optional): 5-fold CV on h14 for the swarm quality headline numbers
+#   Adds a 3rd CLI arg: fold_idx ∈ {0..4}
+for f in 0 1 2 3 4; do
+  python finetune.py h14 gundam    $f
+  python finetune.py h14 pokemon   $f
+  python finetune.py h14 paintings $f
+done
+python swarm_analysis.py   # now reports mean ± std across folds
 ```
 
 ---
@@ -167,7 +195,7 @@ python swarm_analysis.py
 
 4. **finetune.py** is parameterized by `<model_tag> <dataset_tag>` and reads `<dataset_tag>/labels.json` for the class set. LoRA settings: r=16, α=32, `target_modules=["q_proj", "v_proj"]` for CLIP-style models (~0.4–1.0% of parameters); for Jina EVA02 the targets are `attn.proj`/`mlp.fc1`/`mlp.fc2` instead (EVA02's attention bypasses module-level LoRA on `q_proj`/`v_proj` — it accesses `.weight` directly, so adapters there are silently ignored). Loss: Supervised Contrastive (Khosla et al. 2020) — all same-class images in a batch are positives for each other, cross-class are negatives. Trained for 10 epochs at lr=2e-4 with τ=0.07.
 
-5. **embed_imagenette.py** encodes 1000 Imagenette images (10 classes × 100) with each model — first base, then base + LoRA adapter loaded — to verify visually (in the t-SNE) that the Gundam fine-tune doesn't destroy general-purpose semantic clustering.
+5. **embed_food.py** encodes 1000 Food-101 images (10 visually-confusable dishes × 100, picked as 3 mini-clusters: pasta / dessert / sandwich) with each model — first base, then base + LoRA adapter loaded. The t-SNE on these embeddings tests whether the Gundam-trained adapter preserves general-purpose semantic clustering on a *fine-grained* held-out set. (Earlier this used Imagenette, but Imagenette's 10 ImageNet classes — church, parachute, garbage truck, ... — are visually so different that the baseline already nails the t-SNE, so there's nothing for "preservation" to actually test.)
 
 6. **demo_swarm.py** loads the H/14 base once, then for each niche encodes every image with that niche's adapter and saves the resulting index. At search time, the text encoder (frozen, base) encodes the query and a numpy `argpartition` returns the top-K matches from the relevant niche's pre-computed index.
 
@@ -192,16 +220,38 @@ Given a mobile suit image, what fraction of queries have at least one same-serie
 
 ### Visualization 1 — Gundam clustering (LoRA target domain)
 
-PCA (k chosen by ≥95% explained variance) followed by t-SNE (perplexity = √N), run **independently per model and per dataset**. Each row is one model; left = base, right = LoRA fine-tuned:
+**Dim-selection methodology (used uniformly across all four figures below):**
+- PCA: choose `k` = smallest number of components such that cumulative explained variance ≥ 95%, computed *independently per panel* (each panel runs its own PCA fit because base- vs FT-encoder embeddings have different intrinsic dim).
+- t-SNE: perplexity = `⌊√N⌋`, where N is the number of points in the panel.
+- Both choices are principled, not heuristic; they auto-adjust for dataset size (Pokémon N=82 → perplexity 9; Food-101 N=1000 → perplexity 31).
+- **Caveat**: t-SNE coordinates are not directly comparable across panels (each panel = its own non-linear map); only cluster *structure* (tightness, separation) is comparable.
+
+Each row is one model; left = base, right = LoRA fine-tuned:
 
 ![Gundam t-SNE](plots/tsne_gundam.png)
 
 The 6 Gundam series form tighter, more separated clusters after LoRA fine-tuning across all models.
 
-### Visualization 2 — Imagenette (held-out general dataset)
+### Visualization 2 — Pokémon types (h14 swarm base)
 
-The same models encode 1000 Imagenette images (10 ImageNet classes with built-in labels — no prompt-engineering hack). Left = base, right = with the Gundam-trained LoRA loaded:
+Only h14 was fine-tuned for Pokémon (the swarm base). Left = base, right = LoRA fine-tuned:
 
-![Imagenette t-SNE](plots/tsne_imagenette.png)
+![Pokémon t-SNE](plots/tsne_pokemon.png)
 
-The 10-class structure is preserved before vs after LoRA — the Gundam-domain adapter doesn't degrade general semantic clustering. (This is a sanity check for the swarm pattern: niche specialization shouldn't break the base for held-out queries.)
+Type clusters tighten modestly after LoRA — Pokémon types are visually noisier than Gundam series (a Fire-type can be a dragon or a fox or a fish), so contrastive specialization gives a smaller but still visible win.
+
+### Visualization 3 — Painting movements (h14 swarm base)
+
+Same setup, h14 only:
+
+![Paintings t-SNE](plots/tsne_paintings.png)
+
+The 8 art movements form well-separated clusters after LoRA — visual style cues (color palette, brushwork, composition) are strongly correlated with movement, so contrastive fine-tuning produces clean clusters.
+
+### Visualization 4 — Food-101 subset (held-out general dataset)
+
+10 visually-confusable dishes from Food-101 (3 mini-clusters: pasta / dessert / sandwich). Encoded with all 4 models, base AND with the Gundam-trained LoRA loaded. Left = base, right = with Gundam-LoRA:
+
+![Food-101 t-SNE](plots/tsne_food.png)
+
+The 3 super-clusters (pasta in reds, dessert in browns, sandwich in blues) are preserved before vs after LoRA — the Gundam-domain adapter doesn't destroy general semantic clustering on a fine-grained, visually-confusable held-out set. (Sanity check for the swarm pattern: niche specialization shouldn't break the base for held-out queries.)

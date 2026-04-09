@@ -132,3 +132,35 @@ Wrote `demo_swarm.py` — load base once, swap adapter at request time, retrieve
 `swarm_analysis.py` prints three benchmark tables: storage, latency, quality. The headline: **1 base + 3 adapters ≈ 1 base in storage** (adapters are O(MB) on top of GB-scale weights), and adapter swap is in the hundreds of ms — well under any per-request budget. vs reloading 3 GB of safetensors from disk every time you need a different specialization, which is multi-second.
 
 Updated the README with a top-level Swarm section because this feels like the actual differentiator vs the standard "compare 4 CLIP variants + LoRA fine-tune" formula. The 4-model comparison answers *which encoder family is best*; the swarm answers *how to deploy specialization at scale*. Two separate stories, both load-bearing for a Pinterest-type pitch.
+
+## May 11
+
+Two visualization fixes + a sanity check on the held-out dataset.
+
+(1) Added per-niche t-SNE for Pokémon and Paintings — previously only Gundam had a figure even though the swarm has 3 niches. They're 1×2 plots (h14 base vs ft) since only h14 was fine-tuned for the swarm niches. Same systematic PCA→t-SNE pipeline as Gundam: k chosen by ≥95% explained variance per panel, perplexity = ⌊√N⌋. Pokémon clusters tighten modestly; paintings cluster very cleanly (not surprising — visual style cues align strongly with movement at the dataset level).
+
+(2) Realized Imagenette is too easy as the "general semantic preservation" check. The 10 ImageNet classes (tench, parachute, garbage truck, French horn, ...) are visually so different that the baseline already nails the t-SNE — there's nothing for "preservation" to actually test. Replaced with a **Food-101 subset of 10 visually-confusable dishes** in 3 mini-clusters: pasta (lasagna, ravioli, spaghetti bolognese, spaghetti carbonara), dessert (chocolate cake, chocolate mousse, tiramisu), sandwich (hamburger, club sandwich, pulled pork sandwich). Now the held-out plot has actual fine-grained structure that the Gundam-LoRA could potentially break. (Also Pinterest-relevant — food is one of the largest verticals.)
+
+(3) Made the PCA→t-SNE methodology explicit in the README captions: each panel runs its own projection (each embedding distribution has different intrinsic dim, so a constant k would over- or under-compress some), which means t-SNE coords aren't directly comparable across panels — only cluster *structure* is. Worth saying out loud since it's an honest caveat, not a flaw.
+
+## May 13
+
+Bias audit. Did a deeper pass on the swarm quality numbers and found three real problems with the previous +22.9pp / +3.7pp / +15.6pp story.
+
+**Problem 1 — wrong evaluation objective.** The R@K table used **image→image** retrieval inside the val set (recall_at_k_series in finetune.py), but the demo's actual user flow is **text→image**. These two tasks aren't the same thing — image→image directly measures what SupCon optimizes (same-class proximity); text→image depends on text-vision alignment that LoRA doesn't touch. Added `text_quality_table()` to swarm_analysis.py: for each class C in each niche, build 3 prompt templates ("a {C}-type pokemon" / "{C} type pokemon" / "official artwork of a {C} pokemon"), encode with the frozen base text encoder, average to one ensembled prompt embedding, retrieve top-K from val images, compute Precision@K. Mirrors the demo path exactly.
+
+**Problem 2 — paintings R@K was inflated by artist signature.** The huggan/wikiart split was random per file, so Monet was in both train and val under "Impressionism" — the LoRA was learning "this brushstroke is Monet's" rather than "this is Impressionism." Rewrote `collect_paintings.py` to capture the artist field (it was being thrown away), added a per-artist diversity cap of 30 images per movement, and changed the train/val split to be **artist-disjoint per movement**: 80% of artists in train, 20% in val, no overlap. Pop_Art only has 2 artists in wikiart (Warhol + Unknown), so the diversity cap surfaces this honestly — fold-2 and fold-3 essentially have no Pop_Art val items.
+
+**Problem 3 — small val sets, single split.** N=82 (Pokémon) means a 3.7pp delta sits inside its own ~10pp 95% CI. Refactored `finetune.py` to accept a 3rd CLI arg (`fold_idx ∈ 0..4`), pool train+val and re-split deterministically into 5 folds, report mean ± std. For paintings, fold splitting honors the artist-disjoint constraint (round-robin distinct artists into 5 buckets per movement). Ran 15 trainings (5 folds × 3 niches) on h14 over a couple of days.
+
+**Headline numbers, much more honest now:**
+
+| Niche     | image→img R@1            | txt→img P@1               | What changed |
+|-----------|--------------------------|---------------------------|--------------|
+| Gundam    | 84.5 ± 2.1% (+16.7pp)    | 56.7 ± 17.0% (+3.3pp)     | Was +22.9pp; smaller but real |
+| Pokémon   | 60.5 ± 8.3% (+9.5pp)     | **50.0 ± 13.7% (-15.0pp)**| Image up, text DOWN — collapse |
+| Paintings | 88.6 ± 2.6% (-1.6pp)     | 52.5 ± 18.4% (0.0pp)      | Was +15.6pp; **artist memorization** |
+
+Pokémon shows a textbook **vision-only fine-tuning collapse**: SupCon pulls same-class image embeddings together, but the text encoder is frozen, so the vision manifold drifts off the text-vision alignment that CLIP was originally trained for. Image clusters look better in the t-SNE; text retrieval gets meaningfully worse. The story for the writeup is now "specialization works for visually-distinctive niches (Gundam) but breaks alignment for noisier label spaces (Pokémon types) and adds nothing once you remove the artist shortcut (paintings)" — which is actually a much more interesting result than three monotonic +pp wins.
+
+The two-table presentation (image→image AND text→image, side by side, with the gap as the story) is the right framing. Single-metric reporting hides the collapse.

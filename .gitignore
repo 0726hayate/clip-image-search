@@ -3,7 +3,6 @@ gundam/images/
 pokemon/images/
 paintings/images/
 *_lora_*/
-plots/
 *.npy
 swarm_index_*.json
 metadata.json

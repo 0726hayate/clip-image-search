@@ -11,11 +11,15 @@ from peft import LoraConfig, get_peft_model, PeftModel
 from PIL import Image
 
 # ── model + dataset selection ─────────────────────────────────────────────
-# CLI: python finetune.py <model_tag> [<dataset_tag>]
+# CLI: python finetune.py <model_tag> [<dataset_tag>] [<fold_idx>]
 #   model_tag:   "b32" | "l14" | "jina" | "h14"  (default "l14")
 #   dataset_tag: "gundam" | "pokemon" | "paintings"  (default "gundam")
+#   fold_idx:    0..4 for 5-fold CV (omit for legacy single-split mode)
 MODEL_TAG   = sys.argv[1] if len(sys.argv) > 1 else "l14"
 DATASET_TAG = sys.argv[2] if len(sys.argv) > 2 else "gundam"
+FOLD_IDX    = int(sys.argv[3]) if len(sys.argv) > 3 else None
+N_FOLDS     = 5
+FOLD_SEED   = 42
 
 MODEL_CONFIGS = {
     "b32":  {"name": "openai/clip-vit-base-patch32",           "api": "clip"},
@@ -32,10 +36,12 @@ SCRIPT_DIR      = os.path.dirname(os.path.abspath(__file__))
 LABELS_PATH     = os.path.join(SCRIPT_DIR, DATASET_TAG, "labels.json")
 TRAIN_PATH      = os.path.join(SCRIPT_DIR, DATASET_TAG, "train_files.json")
 VAL_PATH        = os.path.join(SCRIPT_DIR, DATASET_TAG, "val_files.json")
-ADAPTER_DIR     = os.path.join(SCRIPT_DIR, f"{DATASET_TAG}_lora_{MODEL_TAG}")
-VAL_BASE_PATH   = os.path.join(SCRIPT_DIR, f"{DATASET_TAG}_val_base_{MODEL_TAG}.npy")
-VAL_FT_PATH     = os.path.join(SCRIPT_DIR, f"{DATASET_TAG}_val_ft_{MODEL_TAG}.npy")
-VAL_LABELS_PATH = os.path.join(SCRIPT_DIR, f"{DATASET_TAG}_val_labels.npy")
+_FOLD_SUFFIX    = f"_fold{FOLD_IDX}" if FOLD_IDX is not None else ""
+ADAPTER_DIR     = os.path.join(SCRIPT_DIR, f"{DATASET_TAG}_lora_{MODEL_TAG}{_FOLD_SUFFIX}")
+VAL_BASE_PATH   = os.path.join(SCRIPT_DIR, f"{DATASET_TAG}_val_base_{MODEL_TAG}{_FOLD_SUFFIX}.npy")
+VAL_FT_PATH     = os.path.join(SCRIPT_DIR, f"{DATASET_TAG}_val_ft_{MODEL_TAG}{_FOLD_SUFFIX}.npy")
+VAL_LABELS_PATH = os.path.join(SCRIPT_DIR, f"{DATASET_TAG}_val_labels{_FOLD_SUFFIX}.npy")
+ARTISTS_PATH    = os.path.join(SCRIPT_DIR, DATASET_TAG, "artists.json")
 
 # ── training settings ─────────────────────────────────────────────────────
 DEVICE      = "cuda" if torch.cuda.is_available() else "cpu"
@@ -50,6 +56,45 @@ def build_class_idx(labels_map):
     """Compute deterministic class -> index map from labels.json (sorted order)."""
     class_names = sorted(set(labels_map.values()))
     return {c: i for i, c in enumerate(class_names)}
+
+
+def make_fold_split(all_files, labels_map, fold_idx, n_folds=N_FOLDS, seed=FOLD_SEED):
+    """5-fold split. If artists.json exists, split is artist-disjoint per class
+    (different artists in train vs val), preventing artist-shortcut leakage on
+    the paintings dataset. Otherwise files are shuffled directly.
+
+    Returns (train_files, val_files) for fold `fold_idx ∈ [0, n_folds)`.
+    """
+    rng = __import__("random").Random(seed)
+
+    if os.path.exists(ARTISTS_PATH):
+        with open(ARTISTS_PATH) as f: artist_map = json.load(f)
+        # Group files by class, then by artist within class. Shuffle artists.
+        train_files, val_files = [], []
+        classes = sorted(set(labels_map.values()))
+        for cls in classes:
+            files_in_c   = [p for p in all_files if labels_map.get(p) == cls]
+            artists_in_c = sorted(set(artist_map.get(p, "unknown") for p in files_in_c))
+            rng.shuffle(artists_in_c)
+            # Round-robin artists into n_folds buckets, then fold_idx is val
+            buckets = [[] for _ in range(n_folds)]
+            for i, a in enumerate(artists_in_c):
+                buckets[i % n_folds].append(a)
+            val_artists = set(buckets[fold_idx])
+            for p in files_in_c:
+                a = artist_map.get(p, "unknown")
+                (val_files if a in val_artists else train_files).append(p)
+        return train_files, val_files
+
+    # No artists.json — file-level shuffle then slice
+    files = list(all_files)
+    rng.shuffle(files)
+    fold_size = len(files) // n_folds
+    start = fold_idx * fold_size
+    end   = start + fold_size if fold_idx < n_folds - 1 else len(files)
+    val_files   = files[start:end]
+    train_files = files[:start] + files[end:]
+    return train_files, val_files
 
 
 class NicheDataset(Dataset):
@@ -182,8 +227,19 @@ def recall_at_k_series(embs, labels, ks=(1, 5, 10)):
 
 if __name__ == "__main__":
     with open(LABELS_PATH) as f: labels_map  = json.load(f)
-    with open(TRAIN_PATH)  as f: train_files = json.load(f)
-    with open(VAL_PATH)    as f: val_files   = json.load(f)
+
+    if FOLD_IDX is not None:
+        # Pool train+val and re-split via deterministic fold logic
+        with open(TRAIN_PATH) as f: train_pool = json.load(f)
+        with open(VAL_PATH)   as f: val_pool   = json.load(f)
+        all_files = train_pool + val_pool
+        train_files, val_files = make_fold_split(all_files, labels_map, FOLD_IDX)
+        artist_disjoint = os.path.exists(ARTISTS_PATH)
+        print(f"FOLD MODE: fold {FOLD_IDX}/{N_FOLDS-1}, "
+              f"{'artist-disjoint' if artist_disjoint else 'file-level'} split")
+    else:
+        with open(TRAIN_PATH) as f: train_files = json.load(f)
+        with open(VAL_PATH)   as f: val_files   = json.load(f)
 
     class_to_idx = build_class_idx(labels_map)
     print(f"model: {MODEL_TAG} ({MODEL_API}) | dataset: {DATASET_TAG} | classes: {list(class_to_idx)}")
