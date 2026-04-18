@@ -136,6 +136,65 @@ def supcon_loss(embs, labels, temperature=TEMPERATURE):
     return loss.mean()
 
 
+# ── Text-anchored CLIP loss (fixes the vision-only collapse) ──────────────
+# Pure SupCon pulls same-class image embs together but the frozen text encoder
+# doesn't move, so the vision manifold drifts off the text-vision alignment
+# CLIP was trained for. Mixing in a CLIP-style InfoNCE between batch images
+# and frozen class-name text embeddings keeps the vision encoder anchored to
+# the text manifold.
+LAMBDA_TEXT = 0.5   # 0 = pure SupCon (old behavior); 0.5 = equal mix
+
+# Prompt templates per niche, used both at training (anchor) and eval (P@K).
+PROMPT_TEMPLATES = {
+    "gundam":    ["a Gundam {C} mobile suit",
+                  "mobile suit from Mobile Suit Gundam {C}",
+                  "mecha from {C}"],
+    "pokemon":   ["a {C}-type pokemon",
+                  "{C} type pokemon",
+                  "official artwork of a {C} pokemon"],
+    "paintings": ["a {C} painting",
+                  "art in the {C} style",
+                  "a painting in the {C} movement"],
+}
+CLASS_DISPLAY = {
+    "gundam":    {"00": "Gundam 00", "age": "AGE", "grg": "Reconguista in G",
+                  "ibo": "Iron-Blooded Orphans", "uc": "Universal Century Unicorn",
+                  "wfm": "Witch from Mercury"},
+    "pokemon":   {},   # lowercase types format fine as-is
+    "paintings": {},   # underscores stripped at format time
+}
+
+
+def compute_class_text_embeddings(clip_base, processor, class_names, dataset_tag):
+    """Frozen text embeddings for each class via 3-prompt ensembling.
+    MUST be called BEFORE wrapping clip_base with PEFT — needs the unmodified
+    text encoder so the anchors live in the original text-vision space.
+    Returns (n_classes, dim) tensor on DEVICE, or None if no templates defined."""
+    templates = PROMPT_TEMPLATES.get(dataset_tag)
+    if templates is None:
+        return None
+    display = CLASS_DISPLAY.get(dataset_tag, {})
+    embs_list = []
+    clip_base.eval()
+    with torch.no_grad():
+        for cls in class_names:
+            cls_display = display.get(cls, cls.replace("_", " "))
+            prompts = [t.format(C=cls_display) for t in templates]
+            inputs = processor(text=prompts, return_tensors="pt", padding=True).to(DEVICE)
+            embs = clip_base.get_text_features(**inputs)
+            embs = F.normalize(embs, dim=-1)
+            mean_emb = F.normalize(embs.mean(0, keepdim=True), dim=-1)
+            embs_list.append(mean_emb[0])
+    return torch.stack(embs_list).to(DEVICE).detach()
+
+
+def text_anchor_loss(image_embs, labels, class_text_embs, temperature=TEMPERATURE):
+    """CLIP-style InfoNCE: pull each image toward its class text emb, push
+    away from other classes' text embeddings. class_text_embs is frozen."""
+    sims = image_embs @ class_text_embs.T / temperature   # (B, n_classes)
+    return F.cross_entropy(sims, labels)
+
+
 def _load_pils(items):
     """Accept either file paths (str) or already-loaded PIL images. Returns list of RGB PILs."""
     out = []
@@ -253,6 +312,13 @@ if __name__ == "__main__":
         dim = clip.config.projection_dim
         print(f"projection_dim={dim} (from model.config)")
 
+        # Compute frozen class-name text embeddings BEFORE LoRA wraps the model.
+        # These anchor the vision LoRA to the original text-vision alignment.
+        class_text_embs = compute_class_text_embeddings(
+            clip, processor, sorted(class_to_idx, key=class_to_idx.get), DATASET_TAG)
+        if class_text_embs is not None:
+            print(f"text anchors: {class_text_embs.shape} (λ={LAMBDA_TEXT})")
+
         lora_config = LoraConfig(
             r=16,
             lora_alpha=32,
@@ -283,6 +349,7 @@ if __name__ == "__main__":
         clip.train()
         for epoch in range(N_EPOCHS):
             total_loss = 0.0
+            total_sup, total_txt = 0.0, 0.0
             for pixel_values, labels_batch in train_loader:
                 pixel_values = pixel_values.to(DEVICE)
                 labels_batch = labels_batch.to(DEVICE)
@@ -291,13 +358,25 @@ if __name__ == "__main__":
                 embs       = clip.visual_projection(vision_out.pooler_output)
                 embs       = F.normalize(embs, dim=-1)
 
-                loss = supcon_loss(embs, labels_batch)
+                sup = supcon_loss(embs, labels_batch)
+                if class_text_embs is not None and LAMBDA_TEXT > 0:
+                    txt = text_anchor_loss(embs, labels_batch, class_text_embs)
+                    loss = (1 - LAMBDA_TEXT) * sup + LAMBDA_TEXT * txt
+                    total_txt += txt.item()
+                else:
+                    loss = sup
+                total_sup += sup.item()
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
                 total_loss += loss.item()
 
-            print(f"  epoch {epoch+1}/{N_EPOCHS}  loss={total_loss/len(train_loader):.4f}")
+            n_batches = len(train_loader)
+            if class_text_embs is not None:
+                print(f"  epoch {epoch+1}/{N_EPOCHS}  loss={total_loss/n_batches:.4f}  "
+                      f"(sup={total_sup/n_batches:.4f}  txt={total_txt/n_batches:.4f})")
+            else:
+                print(f"  epoch {epoch+1}/{N_EPOCHS}  loss={total_loss/n_batches:.4f}")
 
         print("\nencoding val set (fine-tuned)...")
         val_embs_ft, _ = encode_images_clip(

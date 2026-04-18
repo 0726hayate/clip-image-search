@@ -164,3 +164,23 @@ Bias audit. Did a deeper pass on the swarm quality numbers and found three real 
 Pokémon shows a textbook **vision-only fine-tuning collapse**: SupCon pulls same-class image embeddings together, but the text encoder is frozen, so the vision manifold drifts off the text-vision alignment that CLIP was originally trained for. Image clusters look better in the t-SNE; text retrieval gets meaningfully worse. The story for the writeup is now "specialization works for visually-distinctive niches (Gundam) but breaks alignment for noisier label spaces (Pokémon types) and adds nothing once you remove the artist shortcut (paintings)" — which is actually a much more interesting result than three monotonic +pp wins.
 
 The two-table presentation (image→image AND text→image, side by side, with the gap as the story) is the right framing. Single-metric reporting hides the collapse.
+
+## April 18
+
+Fixed the Pokémon collapse. The cause was exactly what you'd expect from theory: pure SupCon optimizes vision-vision proximity but says nothing about vision-text alignment. Since the text encoder is frozen, the vision encoder is free to drift off the original CLIP manifold while still satisfying SupCon. The fix is to add a CLIP-style text-anchor loss term: for each batch image, also pull its embedding toward the encoded class-name prompt (computed once before training with the frozen base text encoder, 3-prompt ensembled). Combined as `(1-λ)·SupCon + λ·text_anchor_loss` with λ=0.5.
+
+Implementation in `finetune.py` is ~30 LOC: `compute_class_text_embeddings()` is called BEFORE wrapping clip with PEFT (so it uses the unmodified text encoder), `text_anchor_loss()` is a one-line cross-entropy over `image_embs @ class_text_embs.T / τ`, and the training loop combines the two losses. Per-niche prompt templates and pretty class display names live in module-level dicts. The training log now prints `loss=X (sup=Y txt=Z)` per epoch — txt loss decays from ~1.5 to ~0.1 over 10 epochs alongside the SupCon term, confirming the anchor is actively shaping gradients.
+
+Re-ran all 15 folds (5 × 3 niches on h14) over a couple of evenings. Numbers below are the new fold-averaged results, with the v1 (no-anchor) numbers in parens for comparison:
+
+| Niche     | image→img R@1            | txt→img P@1                | txt→img P@5               |
+|-----------|--------------------------|----------------------------|---------------------------|
+| Gundam    | **+20.5pp** (was +16.7)  | **+43.3pp** (was +3.3)     | **+56.7pp** (was +13.3)   |
+| Pokémon   | **+10.2pp** (was +9.5)   | **+20.0pp** (was −15.0)    | **+12.0pp** (was −14.5)   |
+| Paintings | −3.6pp (was −1.6)        | +5.0pp (was 0.0)           | +4.5pp (was −8.0)         |
+
+Pokémon collapse fully reversed: a 35pp swing on text→image P@1 with no real loss on image→image. Gundam picked up massively on text retrieval too (+40pp swing) — the v1 SupCon-only adapter was leaving most of the available win on the table. Paintings is the holdout: image→image actually slipped a bit (−1.6 → −3.6) and text→image moved only +5pp. The honest read is paintings under artist-disjoint splits is a hard task that doesn't benefit much from this kind of LoRA — the strong base h14 already captures most of the movement-level signal once you remove the artist shortcut.
+
+Bigger lesson for the writeup: **vision-only LoRA on a frozen-text-encoder model is fundamentally underspecified.** SupCon will happily collapse the vision space toward whatever clusters minimize the loss, drifting off the text manifold as a free side effect. Anchoring with the original text encoder is essentially free (one extra cross-entropy term, a few hundred KB of frozen text embeddings) and the difference is the entire collapse story.
+
+The two-table presentation still earns its keep — it surfaced the collapse in v1 (where one metric improved while the other got worse), and now in v2 it shows the fix worked on the right metric without sacrificing the other. Single-metric reporting would have hidden both halves of the story.

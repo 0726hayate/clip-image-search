@@ -58,33 +58,36 @@ python swarm_analysis.py
 
 Hot-swap is ~8× faster than reloading a full 3 GB model from disk. Combined with text encode + search, end-to-end query latency is ~1 sec from a cold base, dominated by text encoding — well under any per-request budget once the base is warm.
 
-**Quality (Recall@K per niche, 5-fold cross-validation)**
+**Quality (Recall@K per niche, 5-fold cross-validation, with text-anchor loss)**
 
 Image→image retrieval inside the val set: for each val image, check whether any same-class val image is in its top K nearest neighbors. Aggregated as `mean ± std` across 5 folds; for paintings, train/val splits are **artist-disjoint per movement** (Monet stays in one fold) so style cues come from the movement rather than the artist's signature.
 
 | Niche | N (avg val) | Base R@1 | FT R@1 | Δ R@1 | Base R@10 | FT R@10 |
 |---|---|---|---|---|---|---|
-| Gundam | 108 | 67.8 ± 5.3% | **84.5 ± 2.1%** | **+16.7pp** | 98.3 ± 1.1% | 94.3 ± 2.1% |
-| Pokémon | 82 | 51.0 ± 2.6% | 60.5 ± 8.3% | +9.5pp | 92.4 ± 1.4% | 92.2 ± 3.1% |
-| Paintings | 95 | 90.3 ± 3.9% | 88.6 ± 2.6% | -1.6pp | 99.2 ± 1.0% | 97.6 ± 2.7% |
+| Gundam | 108 | 67.8 ± 5.3% | **88.4 ± 2.6%** | **+20.5pp** | 98.3 ± 1.1% | 95.0 ± 0.9% |
+| Pokémon | 82 | 51.0 ± 2.6% | 61.2 ± 4.0% | **+10.2pp** | 92.4 ± 1.4% | 89.3 ± 3.7% |
+| Paintings | 95 | 90.3 ± 3.9% | 86.7 ± 4.4% | -3.6pp | 99.2 ± 1.0% | 96.9 ± 2.7% |
 
 **Quality (text→image P@K, mirrors the demo path)**
 
-For each class C, encode 3 prompt templates (`"a {C}-type pokemon"`, etc.) with the base text encoder, average to one ensembled prompt embedding, retrieve top-K from val images, compute Precision@K. This directly tests the swarm's actual user flow — text query in, ranked images out.
+For each class C, encode 3 prompt templates (`"a {C}-type pokemon"`, etc.) with the **frozen** base text encoder, average to one ensembled prompt embedding, retrieve top-K from val images, compute Precision@K. This directly tests the swarm's actual user flow — text query in, ranked images out.
 
 | Niche | Base P@1 | FT P@1 | Δ P@1 | Base P@5 | FT P@5 | Δ P@5 |
 |---|---|---|---|---|---|---|
-| Gundam | 53.3 ± 6.7% | 56.7 ± 17.0% | +3.3pp | 40.0 ± 5.2% | **53.3 ± 7.9%** | **+13.3pp** |
-| Pokémon | 65.0 ± 9.4% | 50.0 ± 13.7% | **-15.0pp** | 58.0 ± 3.3% | 43.5 ± 5.8% | -14.5pp |
-| Paintings | 52.5 ± 9.4% | 52.5 ± 18.4% | +0.0pp | 54.0 ± 12.4% | 46.0 ± 14.2% | -8.0pp |
+| Gundam | 53.3 ± 6.7% | **96.7 ± 6.7%** | **+43.3pp** | 40.0 ± 5.2% | **96.7 ± 0.0%** | **+56.7pp** |
+| Pokémon | 65.0 ± 9.4% | **85.0 ± 5.0%** | **+20.0pp** | 58.0 ± 3.3% | 70.0 ± 5.2% | +12.0pp |
+| Paintings | 52.5 ± 9.4% | 57.5 ± 20.3% | +5.0pp | 54.0 ± 12.4% | 58.5 ± 14.5% | +4.5pp |
 
-> **The interesting story is the gap between the two tables.** Gundam wins on both — visual design language is rich enough that the SupCon-tightened clusters help text retrieval too. Pokémon shows a classic **embedding-collapse** pattern: image→image goes UP (clusters tighter) while text→image goes DOWN (the LoRA pulls vision embeddings away from the frozen text manifold). Paintings is the most honest result — the **+15.6pp R@1 number we originally published was almost entirely artist memorization**: under artist-disjoint splits, the LoRA gives essentially zero meaningful lift on either metric.
+> **The fix that unlocked text→image.** A first version of this LoRA used pure SupCon (image-image contrastive only) and showed a textbook **embedding collapse** on Pokémon: image→image went UP (+9.5pp R@1) while text→image went DOWN (-15pp P@1). The vision encoder was being pulled away from the frozen text manifold CLIP was originally trained against — clusters got tighter in vision-space but text retrieval got worse. Gundam was barely positive (+3.3pp text→image) for the same reason.
 >
-> **Caveats on these numbers:**
-> - **Image→image vs text→image are different objectives.** Image→image directly measures what SupCon optimizes (same-class proximity); text→image measures the user-facing flow but depends on text-vision alignment that LoRA doesn't explicitly preserve. Reporting both makes the trade-off visible.
-> - **Small val sets** (N=82–108 per niche). The std columns are real fold-to-fold variance, not error bars on a single number.
-> - **Paintings artist-disjoint splits have low artist count for some movements** (Pop_Art only has 2 wikiart artists), so paintings folds 2–4 have skewed val class distribution. The mean ± std reflects this.
-> - **Each t-SNE panel runs its own PCA→t-SNE** — only cluster *structure* is comparable across panels, not absolute 2D coordinates (already noted in figure captions).
+> The fix is a CLIP-style **text-anchor loss term**: for each batch, also pull each image embedding toward its class's text embedding (computed once with the frozen base text encoder via 3-prompt ensembling). Combined as `(1-λ) · SupCon + λ · text_anchor_loss` with λ=0.5. This explicitly preserves the text-vision alignment instead of relying on it as a happy accident. The numbers above are after the fix; the diff is dramatic on text→image (Pokémon -15 → +20pp, Gundam +3 → +43pp).
+>
+> **Caveats:**
+> - **Paintings still doesn't gain meaningfully.** Even with text anchoring, image→image is -3.6pp and text→image is only +5pp under artist-disjoint splits. The original v1 result reported +15.6pp R@1 was almost entirely artist memorization (Monet in both train and val under random split); when forced to learn movement-level features rather than artist signature, the LoRA has little to add over the strong base.
+> - **Image→image vs text→image are different objectives.** Image→image measures within-val class clustering; text→image measures the demo's actual flow. They agree on Gundam and Pokémon now (both up); they disagree on Paintings (small text gain, small image loss).
+> - **Small val sets** (N=82–108 per niche). The std columns are real fold-to-fold variance.
+> - **Pop_Art has only 2 wikiart artists**, so paintings folds 2–4 have skewed val class distribution. The mean ± std reflects this.
+> - **Each t-SNE panel runs its own PCA→t-SNE** — only cluster *structure* is comparable across panels, not absolute 2D coordinates (noted in figure captions).
 
 ---
 
